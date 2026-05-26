@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.3.0...v0.3.1) (2026-05-26)
+
+
+### Bug Fixes
+
+* add error explanation ([2b732d6](https://github.com/l-you/supasend-to-github-contents-proxy/commit/2b732d67f3d0bf85d122a7649d48a3a69687d934))
+
 ## [0.3.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.2.0...v0.3.0) (2026-05-26)
 
 
