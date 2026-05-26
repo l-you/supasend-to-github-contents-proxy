@@ -90,6 +90,7 @@ Failure response body:
 
 ```json
 {
-  "ok": false
+  "ok": false,
+  "error": "unauthorized"
 }
 ```

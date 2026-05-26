@@ -220,7 +220,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeOK(w, status, false)
+	writeJSON(w, status, errorResponse{OK: false, Error: message})
 }
 
 func writeOK(w http.ResponseWriter, status int, ok bool) {
@@ -235,6 +235,11 @@ type captureResponse struct {
 
 type okResponse struct {
 	OK bool `json:"ok"`
+}
+
+type errorResponse struct {
+	OK    bool   `json:"ok"`
+	Error string `json:"error"`
 }
 
 type captureRequest struct {

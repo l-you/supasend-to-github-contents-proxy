@@ -22,7 +22,7 @@ func TestSupasendWebhookRejectsInvalidBearer(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
-	require.JSONEq(t, `{"ok":false}`, rec.Body.String())
+	require.JSONEq(t, `{"ok":false,"error":"unauthorized"}`, rec.Body.String())
 }
 
 func TestSupasendWebhookReturnsBadRequestWithOkFalse(t *testing.T) {
@@ -39,7 +39,7 @@ func TestSupasendWebhookReturnsBadRequestWithOkFalse(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.JSONEq(t, `{"ok":false}`, rec.Body.String())
+	require.JSONEq(t, `{"ok":false,"error":"text is required"}`, rec.Body.String())
 }
 
 func TestFileWebhookRequiresFile(t *testing.T) {
@@ -52,7 +52,7 @@ func TestFileWebhookRequiresFile(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.JSONEq(t, `{"ok":false}`, rec.Body.String())
+	require.JSONEq(t, `{"ok":false,"error":"file_name is required"}`, rec.Body.String())
 }
 
 func TestFileWebhookRejectsInvalidBase64File(t *testing.T) {
@@ -69,7 +69,8 @@ func TestFileWebhookRejectsInvalidBase64File(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.JSONEq(t, `{"ok":false}`, rec.Body.String())
+	require.Contains(t, rec.Body.String(), `"ok":false`)
+	require.Contains(t, rec.Body.String(), `"error":`)
 }
 
 func TestSupasendWebhookReturnsOKTrueOnSuccess(t *testing.T) {
