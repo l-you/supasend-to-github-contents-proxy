@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.3.1...v0.4.0) (2026-05-26)
+
+
+### Features
+
+* **webhooks:** allocate capture paths by note name ([ad7b6b9](https://github.com/l-you/supasend-to-github-contents-proxy/commit/ad7b6b9993bf109fbdd371947a957c17389159cc))
+
+
+### Bug Fixes
+
+* **webhook:** include reason for unknown paths ([5c0d50b](https://github.com/l-you/supasend-to-github-contents-proxy/commit/5c0d50bd15c95dd3960c3a50ab4448494d2c37cf))
+
 ## [0.3.1](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.3.0...v0.3.1) (2026-05-26)
 
 
