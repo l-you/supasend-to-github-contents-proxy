@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.2.0...v0.3.0) (2026-05-26)
+
+
+### Features
+
+* **webhook:** add base64 file captures ([56d13e1](https://github.com/l-you/supasend-to-github-contents-proxy/commit/56d13e1d1aa8f4d1cbbbd60f983e189109e02d5d))
+
 ## [0.2.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.1.0...v0.2.0) (2026-05-25)
 
 
