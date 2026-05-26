@@ -93,13 +93,59 @@ func TestUniquePathsIncrementsDuplicateFilenames(t *testing.T) {
 	paths, err := client.UniquePaths(t.Context(), "owner", "repo", "main", []string{
 		"Inbox/Quick Capture/2026-05-26T10-00-00.md",
 		"Inbox/Quick Capture/2026-05-26T10-00-00.md",
-	})
+	}, 5)
 
 	require.NoError(t, err)
 	require.Equal(t, []string{
 		"Inbox/Quick Capture/2026-05-26T10-00-00-2.md",
 		"Inbox/Quick Capture/2026-05-26T10-00-00-3.md",
 	}, paths)
+}
+
+func TestUniquePathsReturnsErrorAfterMaxSuffix(t *testing.T) {
+	occupied := map[string]struct{}{
+		"Inbox/note.md":   {},
+		"Inbox/note-1.md": {},
+		"Inbox/note-2.md": {},
+		"Inbox/note-3.md": {},
+		"Inbox/note-4.md": {},
+		"Inbox/note-5.md": {},
+	}
+
+	_, err := nextAvailableFilePath("Inbox/note.md", occupied, 5)
+
+	require.Error(t, err)
+	require.True(t, IsPathUnavailable(err))
+}
+
+func TestUniqueDirectoryIncrementsDuplicateFolders(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /repos/owner/repo/git/ref/heads/main":
+			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
+		case "GET /repos/owner/repo/git/commits/base":
+			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
+		case "GET /repos/owner/repo/git/trees/tree-base":
+			writeTestJSON(t, w, map[string]any{
+				"sha": "tree-base",
+				"tree": []map[string]string{
+					{"path": "Inbox/receipt/receipt.md", "type": "blob"},
+					{"path": "Inbox/receipt-1/receipt-1.md", "type": "blob"},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token", server.Client())
+	require.NoError(t, err)
+
+	dir, err := client.UniqueDirectory(t.Context(), "owner", "repo", "main", "Inbox/receipt", 5)
+
+	require.NoError(t, err)
+	require.Equal(t, "Inbox/receipt-2", dir)
 }
 
 func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {

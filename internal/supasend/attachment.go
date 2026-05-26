@@ -10,22 +10,19 @@ import (
 	"net/url"
 	"path"
 	"strings"
-	"time"
 	"unicode"
 )
 
 type Attachment struct {
-	Path        string
 	Content     []byte
 	ContentType string
+	FileName    string
 }
 
 func DownloadAttachment(
 	ctx context.Context,
 	client *http.Client,
 	rawURL string,
-	dir string,
-	createdAt time.Time,
 	maxBytes int64,
 ) (Attachment, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
@@ -51,12 +48,11 @@ func DownloadAttachment(
 	}
 
 	filename := filenameFromResponse(rawURL, resp.Header)
-	timestamp := createdAt.UTC().Format("2006-01-02T15-04-05")
 
 	return Attachment{
-		Path:        path.Join(dir, timestamp+"-"+filename),
 		Content:     content,
 		ContentType: strings.TrimSpace(resp.Header.Get("Content-Type")),
+		FileName:    filename,
 	}, nil
 }
 

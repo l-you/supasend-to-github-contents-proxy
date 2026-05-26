@@ -2,7 +2,6 @@ package note
 
 import (
 	"fmt"
-	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -14,13 +13,10 @@ type Capture struct {
 	CreatedAt             time.Time
 	DueDateUTC            string
 	FileURL               string
-	FileName              string
+	NoteName              string
+	AttachmentName        string
 	AttachmentPath        string
 	AttachmentContentType string
-}
-
-func Path(dir string, createdAt time.Time) string {
-	return path.Join(dir, createdAt.UTC().Format("2006-01-02T15-04-05")+".md")
 }
 
 func Render(c Capture) []byte {
@@ -39,8 +35,11 @@ func Render(c Capture) []byte {
 	if c.FileURL != "" {
 		writeField(&b, "file_url", c.FileURL)
 	}
-	if c.FileName != "" {
-		writeField(&b, "file_name", c.FileName)
+	if c.NoteName != "" {
+		writeField(&b, "file_name", c.NoteName)
+	}
+	if c.AttachmentName != "" {
+		writeField(&b, "attachment_name", c.AttachmentName)
 	}
 	if c.AttachmentPath != "" {
 		writeField(&b, "attachment", c.AttachmentPath)

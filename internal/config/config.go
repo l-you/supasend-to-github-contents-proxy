@@ -14,7 +14,6 @@ const (
 	defaultGitHubBranch    = "main"
 	defaultListenAddr      = ":8080"
 	defaultNoteDir         = "Inbox/Quick Capture"
-	defaultAttachmentDir   = "Attachments/Supasend"
 	defaultAttachmentBytes = 25 * 1024 * 1024
 )
 
@@ -27,7 +26,6 @@ type Config struct {
 	WebhookToken      string
 	ListenAddr        string
 	NoteDir           string
-	AttachmentDir     string
 	MaxAttachmentSize int64
 }
 
@@ -41,7 +39,6 @@ func Load() (Config, error) {
 		WebhookToken:      strings.TrimSpace(os.Getenv("WEBHOOK_TOKEN")),
 		ListenAddr:        envOrDefault("LISTEN_ADDR", defaultListenAddr),
 		NoteDir:           envOrDefault("NOTE_DIR", defaultNoteDir),
-		AttachmentDir:     envOrDefault("ATTACHMENT_DIR", defaultAttachmentDir),
 		MaxAttachmentSize: defaultAttachmentBytes,
 	}
 
@@ -95,13 +92,8 @@ func (cfg *Config) validate() error {
 	if err != nil {
 		return fmt.Errorf("invalid NOTE_DIR: %w", err)
 	}
-	attachmentDir, err := cleanRepoDir(cfg.AttachmentDir)
-	if err != nil {
-		return fmt.Errorf("invalid ATTACHMENT_DIR: %w", err)
-	}
 
 	cfg.NoteDir = noteDir
-	cfg.AttachmentDir = attachmentDir
 	return nil
 }
 

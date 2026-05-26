@@ -25,6 +25,15 @@ type CommitResult struct {
 	SHA string
 }
 
+type PathUnavailableError struct {
+	Path     string
+	MaxIndex int
+}
+
+func (e PathUnavailableError) Error() string {
+	return fmt.Sprintf("no available path for %q after suffix -%d", e.Path, e.MaxIndex)
+}
+
 func NewClient(apiURL string, token string, httpClient *http.Client) (*Client, error) {
 	options := []gh.ClientOptionsFunc{gh.WithAuthToken(token)}
 	if httpClient != nil {
@@ -115,7 +124,48 @@ func (c *Client) UniquePaths(
 	repo string,
 	branch string,
 	desiredPaths []string,
+	maxIndex int,
 ) ([]string, error) {
+	occupied, err := c.OccupiedPaths(ctx, owner, repo, branch)
+	if err != nil {
+		return nil, err
+	}
+
+	paths := make([]string, 0, len(desiredPaths))
+	for _, desiredPath := range desiredPaths {
+		uniquePath, err := nextAvailableFilePath(desiredPath, occupied, maxIndex)
+		if err != nil {
+			return nil, err
+		}
+		occupied[uniquePath] = struct{}{}
+		paths = append(paths, uniquePath)
+	}
+
+	return paths, nil
+}
+
+func (c *Client) UniqueDirectory(
+	ctx context.Context,
+	owner string,
+	repo string,
+	branch string,
+	desiredPath string,
+	maxIndex int,
+) (string, error) {
+	occupied, err := c.OccupiedPaths(ctx, owner, repo, branch)
+	if err != nil {
+		return "", err
+	}
+
+	return nextAvailableDirectoryPath(desiredPath, occupied, maxIndex)
+}
+
+func (c *Client) OccupiedPaths(
+	ctx context.Context,
+	owner string,
+	repo string,
+	branch string,
+) (map[string]struct{}, error) {
 	ref, _, err := c.git.GetRef(ctx, owner, repo, headRef(branch))
 	if err != nil {
 		return nil, err
@@ -131,21 +181,14 @@ func (c *Client) UniquePaths(
 		return nil, err
 	}
 
-	occupied := make(map[string]struct{}, len(tree.Entries)+len(desiredPaths))
+	occupied := make(map[string]struct{}, len(tree.Entries))
 	for _, entry := range tree.Entries {
 		if entry.GetPath() != "" {
 			occupied[entry.GetPath()] = struct{}{}
 		}
 	}
 
-	paths := make([]string, 0, len(desiredPaths))
-	for _, desiredPath := range desiredPaths {
-		uniquePath := nextAvailablePath(desiredPath, occupied)
-		occupied[uniquePath] = struct{}{}
-		paths = append(paths, uniquePath)
-	}
-
-	return paths, nil
+	return occupied, nil
 }
 
 func isRetryable(err error) bool {
@@ -159,6 +202,11 @@ func isRetryable(err error) bool {
 
 func IsRetryable(err error) bool {
 	return isRetryable(err)
+}
+
+func IsPathUnavailable(err error) bool {
+	var pathErr PathUnavailableError
+	return errors.As(err, &pathErr)
 }
 
 func isDefaultAPIURL(apiURL string) bool {
@@ -180,20 +228,49 @@ func headRef(branch string) string {
 	return "heads/" + branch
 }
 
-func nextAvailablePath(desiredPath string, occupied map[string]struct{}) string {
+func nextAvailableFilePath(desiredPath string, occupied map[string]struct{}, maxIndex int) (string, error) {
 	desiredPath = path.Clean(desiredPath)
 	if _, exists := occupied[desiredPath]; !exists {
-		return desiredPath
+		return desiredPath, nil
 	}
 
 	dir, file := path.Split(desiredPath)
 	extension := path.Ext(file)
 	name := strings.TrimSuffix(file, extension)
 
-	for suffix := 1; ; suffix++ {
+	for suffix := 1; suffix <= maxIndex; suffix++ {
 		candidate := path.Join(dir, fmt.Sprintf("%s-%d%s", name, suffix, extension))
 		if _, exists := occupied[candidate]; !exists {
-			return candidate
+			return candidate, nil
 		}
 	}
+
+	return "", PathUnavailableError{Path: desiredPath, MaxIndex: maxIndex}
+}
+
+func nextAvailableDirectoryPath(desiredPath string, occupied map[string]struct{}, maxIndex int) (string, error) {
+	desiredPath = path.Clean(desiredPath)
+	if !directoryOccupied(desiredPath, occupied) {
+		return desiredPath, nil
+	}
+
+	for suffix := 1; suffix <= maxIndex; suffix++ {
+		candidate := fmt.Sprintf("%s-%d", desiredPath, suffix)
+		if !directoryOccupied(candidate, occupied) {
+			return candidate, nil
+		}
+	}
+
+	return "", PathUnavailableError{Path: desiredPath, MaxIndex: maxIndex}
+}
+
+func directoryOccupied(dir string, occupied map[string]struct{}) bool {
+	dir = strings.TrimSuffix(path.Clean(dir), "/")
+	for occupiedPath := range occupied {
+		if occupiedPath == dir || strings.HasPrefix(occupiedPath, dir+"/") {
+			return true
+		}
+	}
+
+	return false
 }

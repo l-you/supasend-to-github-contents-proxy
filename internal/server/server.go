@@ -16,6 +16,7 @@ import (
 )
 
 const maxPayloadBytes = 1024 * 1024
+const maxDuplicateIndex = 5
 
 type Server struct {
 	cfg        config.Config
@@ -83,6 +84,10 @@ func (s *Server) handleCapture(
 	result, err := s.captureToGitHub(r, capture)
 	if err != nil {
 		log.Printf("capture failed: %v", err)
+		if githubapi.IsPathUnavailable(err) {
+			writeError(w, http.StatusConflict, err.Error())
+			return
+		}
 		writeError(w, http.StatusBadGateway, "failed to write capture")
 		return
 	}
@@ -119,6 +124,8 @@ func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (c
 	var files []githubapi.File
 	var attachmentPath string
 	var attachmentContentType string
+	var attachmentName string
+	var attachmentContent []byte
 
 	switch {
 	case capture.FileURL != "":
@@ -126,49 +133,35 @@ func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (c
 			r.Context(),
 			s.httpClient,
 			capture.FileURL,
-			s.cfg.AttachmentDir,
-			capture.CreatedAt,
 			s.cfg.MaxAttachmentSize,
 		)
 		if err != nil {
 			return captureResponse{}, err
 		}
 
-		attachmentPath = attachment.Path
+		attachmentName = attachment.FileName
 		attachmentContentType = attachment.ContentType
-		files = append(files, githubapi.File{Path: attachment.Path, Content: attachment.Content})
-	case capture.FileName != "":
-		attachmentPath = path.Join(
-			s.cfg.AttachmentDir,
-			capture.CreatedAt.UTC().Format("2006-01-02T15-04-05")+"-"+capture.FileName,
-		)
-		attachmentContentType = capture.FileContentType
-		files = append(files, githubapi.File{Path: attachmentPath, Content: capture.FileContent})
+		attachmentContent = attachment.Content
+	case capture.AttachmentName != "":
+		attachmentName = capture.AttachmentName
+		attachmentContentType = capture.AttachmentContentType
+		attachmentContent = capture.AttachmentContent
 	}
 
-	notePath := note.Path(s.cfg.NoteDir, capture.CreatedAt)
-	desiredPaths := make([]string, 0, len(files)+1)
-	for _, file := range files {
-		desiredPaths = append(desiredPaths, file.Path)
-	}
-	desiredPaths = append(desiredPaths, notePath)
-
-	uniquePaths, err := s.github.UniquePaths(
-		r.Context(),
-		s.cfg.GitHubOwner,
-		s.cfg.GitHubRepo,
-		s.cfg.GitHubBranch,
-		desiredPaths,
-	)
+	notePath, noteName, err := s.allocateNotePath(r, capture, attachmentName != "")
 	if err != nil {
 		return captureResponse{}, err
 	}
 
-	for i := range files {
-		files[i].Path = uniquePaths[i]
-		attachmentPath = uniquePaths[i]
+	if attachmentName != "" {
+		extension := path.Ext(attachmentName)
+		attachmentPath = path.Join(path.Dir(notePath), noteName+extension)
+		files = append(files, githubapi.File{Path: attachmentPath, Content: attachmentContent})
 	}
-	notePath = uniquePaths[len(uniquePaths)-1]
+	attachmentBaseName := ""
+	if attachmentPath != "" {
+		attachmentBaseName = path.Base(attachmentPath)
+	}
 
 	noteContent := note.Render(note.Capture{
 		Source:                capture.Source,
@@ -176,7 +169,8 @@ func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (c
 		CreatedAt:             capture.CreatedAt,
 		DueDateUTC:            capture.DueDateUTC,
 		FileURL:               capture.FileURL,
-		FileName:              capture.FileName,
+		NoteName:              noteName,
+		AttachmentName:        attachmentBaseName,
 		AttachmentPath:        attachmentPath,
 		AttachmentContentType: attachmentContentType,
 	})
@@ -199,6 +193,51 @@ func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (c
 		NotePath:       notePath,
 		AttachmentPath: attachmentPath,
 	}, nil
+}
+
+func (s *Server) allocateNotePath(
+	r *http.Request,
+	capture captureRequest,
+	hasAttachment bool,
+) (string, string, error) {
+	noteName := capture.NoteName
+	if noteName == "" {
+		noteName = capture.CreatedAt.UTC().Format("2006-01-02T15-04-05")
+	}
+
+	if hasAttachment {
+		folderPath, err := s.github.UniqueDirectory(
+			r.Context(),
+			s.cfg.GitHubOwner,
+			s.cfg.GitHubRepo,
+			s.cfg.GitHubBranch,
+			path.Join(s.cfg.NoteDir, noteName),
+			maxDuplicateIndex,
+		)
+		if err != nil {
+			return "", "", err
+		}
+
+		folderName := path.Base(folderPath)
+		return path.Join(folderPath, folderName+".md"), folderName, nil
+	}
+
+	notePath := path.Join(s.cfg.NoteDir, noteName+".md")
+	uniquePaths, err := s.github.UniquePaths(
+		r.Context(),
+		s.cfg.GitHubOwner,
+		s.cfg.GitHubRepo,
+		s.cfg.GitHubBranch,
+		[]string{notePath},
+		maxDuplicateIndex,
+	)
+	if err != nil {
+		return "", "", err
+	}
+
+	uniqueNotePath := uniquePaths[0]
+	uniqueNoteName := strings.TrimSuffix(path.Base(uniqueNotePath), path.Ext(uniqueNotePath))
+	return uniqueNotePath, uniqueNoteName, nil
 }
 
 func validBearer(header string, token string) bool {
@@ -243,12 +282,13 @@ type errorResponse struct {
 }
 
 type captureRequest struct {
-	Source          string
-	Text            string
-	FileURL         string
-	FileName        string
-	FileContent     []byte
-	FileContentType string
-	DueDateUTC      string
-	CreatedAt       time.Time
+	Source                string
+	Text                  string
+	FileURL               string
+	NoteName              string
+	AttachmentName        string
+	AttachmentContent     []byte
+	AttachmentContentType string
+	DueDateUTC            string
+	CreatedAt             time.Time
 }

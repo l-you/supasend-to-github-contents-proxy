@@ -40,19 +40,22 @@ func decodeFileCapture(r *http.Request, fallbackCreatedAt time.Time) (captureReq
 		return captureRequest{}, errors.New("text is required")
 	}
 
-	fileName := sanitizeFilename(payload.FileName)
-	if fileName == "" {
-		return captureRequest{}, errors.New("file_name is required")
-	}
+	noteName := sanitizeNoteName(payload.FileName)
+	attachmentName := sanitizeFilename(payload.AttachmentName)
+	attachment := strings.TrimSpace(payload.Attachment)
+	var attachmentContent []byte
 
-	file := strings.TrimSpace(payload.File)
-	if file == "" {
-		return captureRequest{}, errors.New("file is required")
-	}
-
-	content, err := base64.StdEncoding.DecodeString(file)
-	if err != nil {
-		return captureRequest{}, fmt.Errorf("decode file: %w", err)
+	switch {
+	case attachmentName == "" && attachment != "":
+		return captureRequest{}, errors.New("attachment_name is required when attachment is provided")
+	case attachmentName != "" && attachment == "":
+		return captureRequest{}, errors.New("attachment is required when attachment_name is provided")
+	case attachmentName != "" && attachment != "":
+		content, err := base64.StdEncoding.DecodeString(attachment)
+		if err != nil {
+			return captureRequest{}, fmt.Errorf("decode attachment: %w", err)
+		}
+		attachmentContent = content
 	}
 
 	createdAt, err := parseCreatedAt(payload.CreatedAt, fallbackCreatedAt)
@@ -61,13 +64,14 @@ func decodeFileCapture(r *http.Request, fallbackCreatedAt time.Time) (captureReq
 	}
 
 	return captureRequest{
-		Source:          "file",
-		Text:            text,
-		FileName:        fileName,
-		FileContent:     content,
-		FileContentType: strings.TrimSpace(payload.FileContentType),
-		DueDateUTC:      strings.TrimSpace(payload.DueDateUTC),
-		CreatedAt:       createdAt,
+		Source:                "file",
+		Text:                  text,
+		NoteName:              noteName,
+		AttachmentName:        attachmentName,
+		AttachmentContent:     attachmentContent,
+		AttachmentContentType: strings.TrimSpace(payload.AttachmentContentType),
+		DueDateUTC:            strings.TrimSpace(payload.DueDateUTC),
+		CreatedAt:             createdAt,
 	}, nil
 }
 
@@ -103,11 +107,22 @@ func sanitizeFilename(value string) string {
 	return strings.Trim(b.String(), ".-")
 }
 
+func sanitizeNoteName(value string) string {
+	name := sanitizeFilename(value)
+	extension := path.Ext(name)
+	if strings.EqualFold(extension, ".md") {
+		name = strings.TrimSuffix(name, extension)
+	}
+
+	return strings.Trim(name, ".-")
+}
+
 type filePayload struct {
-	Text            string `json:"text"`
-	FileName        string `json:"file_name"`
-	File            string `json:"file"`
-	FileContentType string `json:"file_content_type"`
-	DueDateUTC      string `json:"due_date_utc"`
-	CreatedAt       string `json:"created_at"`
+	Text                  string `json:"text"`
+	FileName              string `json:"file_name"`
+	AttachmentName        string `json:"attachment_name"`
+	Attachment            string `json:"attachment"`
+	AttachmentContentType string `json:"attachment_content_type"`
+	DueDateUTC            string `json:"due_date_utc"`
+	CreatedAt             string `json:"created_at"`
 }
