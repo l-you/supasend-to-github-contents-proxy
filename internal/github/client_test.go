@@ -19,7 +19,7 @@ func TestCommitFilesCreatesOneGitCommit(t *testing.T) {
 
 		switch r.Method + " " + r.URL.Path {
 		case "GET /repos/owner/repo/git/ref/heads/main":
-			writeTestJSON(t, w, refResponseFixture("base"))
+			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
 		case "GET /repos/owner/repo/git/commits/base":
 			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
 		case "POST /repos/owner/repo/git/blobs":
@@ -28,13 +28,13 @@ func TestCommitFilesCreatesOneGitCommit(t *testing.T) {
 			content, err := base64.StdEncoding.DecodeString(request.Content)
 			require.NoError(t, err)
 			blobContents = append(blobContents, string(content))
-			writeTestJSON(t, w, blobResponse{SHA: "blob-" + string(rune('0'+len(blobContents)))})
+			writeTestJSON(t, w, map[string]string{"sha": "blob-" + string(rune('0'+len(blobContents)))})
 		case "POST /repos/owner/repo/git/trees":
 			var request treeRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			require.Equal(t, "tree-base", request.BaseTree)
 			require.Len(t, request.Tree, 2)
-			writeTestJSON(t, w, treeResponse{SHA: "tree-new"})
+			writeTestJSON(t, w, map[string]string{"sha": "tree-new"})
 		case "POST /repos/owner/repo/git/commits":
 			var request createCommitRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
@@ -51,7 +51,8 @@ func TestCommitFilesCreatesOneGitCommit(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := NewClient(server.URL, "token", server.Client())
+	client, err := NewClient(server.URL, "token", server.Client())
+	require.NoError(t, err)
 
 	result, err := client.CommitFiles(t.Context(), "owner", "repo", "main", "Add Supasend capture", []File{
 		{Path: "Attachments/Supasend/a.png", Content: []byte("attachment")},
@@ -59,10 +60,46 @@ func TestCommitFilesCreatesOneGitCommit(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	require.True(t, result.Created)
 	require.Equal(t, "new", result.SHA)
 	require.Equal(t, []string{"attachment", "note"}, blobContents)
 	require.Equal(t, updateRefRequest{SHA: "new", Force: false}, updatedRef)
+}
+
+func TestUniquePathsIncrementsDuplicateFilenames(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /repos/owner/repo/git/ref/heads/main":
+			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
+		case "GET /repos/owner/repo/git/commits/base":
+			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
+		case "GET /repos/owner/repo/git/trees/tree-base":
+			require.Equal(t, "1", r.URL.Query().Get("recursive"))
+			writeTestJSON(t, w, map[string]any{
+				"sha": "tree-base",
+				"tree": []map[string]string{
+					{"path": "Inbox/Quick Capture/2026-05-26T10-00-00.md", "type": "blob"},
+					{"path": "Inbox/Quick Capture/2026-05-26T10-00-00-1.md", "type": "blob"},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token", server.Client())
+	require.NoError(t, err)
+
+	paths, err := client.UniquePaths(t.Context(), "owner", "repo", "main", []string{
+		"Inbox/Quick Capture/2026-05-26T10-00-00.md",
+		"Inbox/Quick Capture/2026-05-26T10-00-00.md",
+	})
+
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		"Inbox/Quick Capture/2026-05-26T10-00-00-2.md",
+		"Inbox/Quick Capture/2026-05-26T10-00-00-3.md",
+	}, paths)
 }
 
 func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
@@ -71,15 +108,37 @@ func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
 	require.NoError(t, json.NewEncoder(w).Encode(value))
 }
 
-func refResponseFixture(sha string) refResponse {
-	var response refResponse
-	response.Object.SHA = sha
-	return response
+func commitResponseFixture(sha string, treeSHA string) map[string]any {
+	return map[string]any{
+		"sha":  sha,
+		"tree": map[string]string{"sha": treeSHA},
+	}
 }
 
-func commitResponseFixture(sha string, treeSHA string) commitResponse {
-	var response commitResponse
-	response.SHA = sha
-	response.Tree.SHA = treeSHA
-	return response
+type blobRequest struct {
+	Content  string `json:"content"`
+	Encoding string `json:"encoding"`
+}
+
+type treeRequest struct {
+	BaseTree string          `json:"base_tree"`
+	Tree     []treeEntryItem `json:"tree"`
+}
+
+type treeEntryItem struct {
+	Path string `json:"path"`
+	Mode string `json:"mode"`
+	Type string `json:"type"`
+	SHA  string `json:"sha"`
+}
+
+type updateRefRequest struct {
+	SHA   string `json:"sha"`
+	Force bool   `json:"force"`
+}
+
+type createCommitRequest struct {
+	Message string   `json:"message"`
+	Tree    string   `json:"tree"`
+	Parents []string `json:"parents"`
 }

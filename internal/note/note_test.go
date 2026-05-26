@@ -20,13 +20,14 @@ func TestRenderIncludesCreatedAtAndAttachment(t *testing.T) {
 		Text:                  "hello",
 		CreatedAt:             createdAt,
 		DueDateUTC:            "2026-05-27T10:00:00Z",
-		SharedURL:             "https://example.com/a.png",
+		FileURL:               "https://example.com/a.png",
 		AttachmentPath:        "Attachments/Supasend/a.png",
 		AttachmentContentType: "image/png",
 	}))
 
 	require.Contains(t, content, "created_at: \"2026-05-26T10:00:00Z\"")
 	require.Contains(t, content, "due_date_utc: \"2026-05-27T10:00:00Z\"")
+	require.Contains(t, content, "file_url: \"https://example.com/a.png\"")
 	require.Contains(t, content, "attachment: \"Attachments/Supasend/a.png\"")
 	require.Contains(t, content, "hello\n\n![[Attachments/Supasend/a.png]]\n")
 }

@@ -9,10 +9,12 @@ import (
 )
 
 type Capture struct {
+	Source                string
 	Text                  string
 	CreatedAt             time.Time
 	DueDateUTC            string
-	SharedURL             string
+	FileURL               string
+	FileName              string
 	AttachmentPath        string
 	AttachmentContentType string
 }
@@ -25,13 +27,20 @@ func Render(c Capture) []byte {
 	var b strings.Builder
 
 	b.WriteString("---\n")
-	writeField(&b, "source", "supasend")
+	source := c.Source
+	if source == "" {
+		source = "supasend"
+	}
+	writeField(&b, "source", source)
 	writeField(&b, "created_at", c.CreatedAt.UTC().Format(time.RFC3339))
 	if c.DueDateUTC != "" {
 		writeField(&b, "due_date_utc", c.DueDateUTC)
 	}
-	if c.SharedURL != "" {
-		writeField(&b, "shared_url", c.SharedURL)
+	if c.FileURL != "" {
+		writeField(&b, "file_url", c.FileURL)
+	}
+	if c.FileName != "" {
+		writeField(&b, "file_name", c.FileName)
 	}
 	if c.AttachmentPath != "" {
 		writeField(&b, "attachment", c.AttachmentPath)

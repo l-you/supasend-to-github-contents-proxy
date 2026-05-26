@@ -15,6 +15,12 @@ Inbox/Quick Capture/<created_at>.md
 Attachments/Supasend/<created_at>-<filename>
 ```
 
+If a target path already exists, the service writes the next free name:
+
+```text
+Inbox/Quick Capture/2026-05-26T10-00-00-1.md
+```
+
 ## Config
 
 Required:
@@ -51,4 +57,39 @@ curl -X POST http://localhost:8080/webhooks/supasend \
   -H "Authorization: Bearer $WEBHOOK_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"text":"hello","created_at":"2026-05-26T10:00:00Z"}'
+```
+
+Supasend attachment payload:
+
+```json
+{
+  "text": "receipt",
+  "shared_url": "https://example.com/receipt.jpg",
+  "created_at": "2026-05-26T10:00:00Z"
+}
+```
+
+Custom file endpoint:
+
+```sh
+curl -X POST http://localhost:8080/webhooks/file \
+  -H "Authorization: Bearer $WEBHOOK_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"text":"receipt","file_name":"receipt.txt","file":"aGVsbG8K"}'
+```
+
+Response body:
+
+```json
+{
+  "ok": true
+}
+```
+
+Failure response body:
+
+```json
+{
+  "ok": false
+}
 ```

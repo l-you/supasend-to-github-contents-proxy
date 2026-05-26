@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -39,15 +40,29 @@ func New(cfg config.Config, githubClient *githubapi.Client, httpClient *http.Cli
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/healthz":
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+		writeOK(w, http.StatusOK, true)
 	case "/webhooks/supasend":
 		s.handleSupasend(w, r)
+	case "/webhooks/file":
+		s.handleFile(w, r)
 	default:
-		http.NotFound(w, r)
+		writeOK(w, http.StatusNotFound, false)
 	}
 }
 
 func (s *Server) handleSupasend(w http.ResponseWriter, r *http.Request) {
+	s.handleCapture(w, r, decodeSupasendCapture)
+}
+
+func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
+	s.handleCapture(w, r, decodeFileCapture)
+}
+
+func (s *Server) handleCapture(
+	w http.ResponseWriter,
+	r *http.Request,
+	decode func(r *http.Request, fallbackCreatedAt time.Time) (captureRequest, error),
+) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -58,8 +73,8 @@ func (s *Server) handleSupasend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := http.MaxBytesReader(w, r.Body, maxPayloadBytes)
-	capture, err := supasend.DecodePayload(body, s.now())
+	r.Body = http.MaxBytesReader(w, r.Body, maxPayloadBytes)
+	capture, err := decode(r, s.now())
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -72,23 +87,45 @@ func (s *Server) handleSupasend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	status := http.StatusCreated
-	if !result.Created {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, result)
+	log.Printf(
+		"capture saved: source=%s note=%s attachment=%s commit=%s",
+		capture.Source,
+		result.NotePath,
+		result.AttachmentPath,
+		result.CommitSHA,
+	)
+	writeOK(w, http.StatusOK, true)
 }
 
-func (s *Server) captureToGitHub(r *http.Request, capture supasend.Capture) (captureResponse, error) {
+func (s *Server) captureToGitHub(r *http.Request, capture captureRequest) (captureResponse, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		result, err := s.captureToGitHubOnce(r, capture)
+		if err == nil {
+			return result, nil
+		}
+		if !githubapi.IsRetryable(err) {
+			return captureResponse{}, err
+		}
+
+		lastErr = err
+		time.Sleep(time.Duration(attempt+1) * 200 * time.Millisecond)
+	}
+
+	return captureResponse{}, lastErr
+}
+
+func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (captureResponse, error) {
 	var files []githubapi.File
 	var attachmentPath string
 	var attachmentContentType string
 
-	if capture.SharedURL != "" {
+	switch {
+	case capture.FileURL != "":
 		attachment, err := supasend.DownloadAttachment(
 			r.Context(),
 			s.httpClient,
-			capture.SharedURL,
+			capture.FileURL,
 			s.cfg.AttachmentDir,
 			capture.CreatedAt,
 			s.cfg.MaxAttachmentSize,
@@ -100,14 +137,46 @@ func (s *Server) captureToGitHub(r *http.Request, capture supasend.Capture) (cap
 		attachmentPath = attachment.Path
 		attachmentContentType = attachment.ContentType
 		files = append(files, githubapi.File{Path: attachment.Path, Content: attachment.Content})
+	case capture.FileName != "":
+		attachmentPath = path.Join(
+			s.cfg.AttachmentDir,
+			capture.CreatedAt.UTC().Format("2006-01-02T15-04-05")+"-"+capture.FileName,
+		)
+		attachmentContentType = capture.FileContentType
+		files = append(files, githubapi.File{Path: attachmentPath, Content: capture.FileContent})
 	}
 
 	notePath := note.Path(s.cfg.NoteDir, capture.CreatedAt)
+	desiredPaths := make([]string, 0, len(files)+1)
+	for _, file := range files {
+		desiredPaths = append(desiredPaths, file.Path)
+	}
+	desiredPaths = append(desiredPaths, notePath)
+
+	uniquePaths, err := s.github.UniquePaths(
+		r.Context(),
+		s.cfg.GitHubOwner,
+		s.cfg.GitHubRepo,
+		s.cfg.GitHubBranch,
+		desiredPaths,
+	)
+	if err != nil {
+		return captureResponse{}, err
+	}
+
+	for i := range files {
+		files[i].Path = uniquePaths[i]
+		attachmentPath = uniquePaths[i]
+	}
+	notePath = uniquePaths[len(uniquePaths)-1]
+
 	noteContent := note.Render(note.Capture{
+		Source:                capture.Source,
 		Text:                  capture.Text,
 		CreatedAt:             capture.CreatedAt,
 		DueDateUTC:            capture.DueDateUTC,
-		SharedURL:             capture.SharedURL,
+		FileURL:               capture.FileURL,
+		FileName:              capture.FileName,
 		AttachmentPath:        attachmentPath,
 		AttachmentContentType: attachmentContentType,
 	})
@@ -126,7 +195,6 @@ func (s *Server) captureToGitHub(r *http.Request, capture supasend.Capture) (cap
 	}
 
 	return captureResponse{
-		Created:        commit.Created,
 		CommitSHA:      commit.SHA,
 		NotePath:       notePath,
 		AttachmentPath: attachmentPath,
@@ -152,16 +220,30 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, errorResponse{Error: message})
+	writeOK(w, status, false)
+}
+
+func writeOK(w http.ResponseWriter, status int, ok bool) {
+	writeJSON(w, status, okResponse{OK: ok})
 }
 
 type captureResponse struct {
-	Created        bool   `json:"created"`
 	CommitSHA      string `json:"commit_sha"`
 	NotePath       string `json:"note_path"`
 	AttachmentPath string `json:"attachment_path,omitempty"`
 }
 
-type errorResponse struct {
-	Error string `json:"error"`
+type okResponse struct {
+	OK bool `json:"ok"`
+}
+
+type captureRequest struct {
+	Source          string
+	Text            string
+	FileURL         string
+	FileName        string
+	FileContent     []byte
+	FileContentType string
+	DueDateUTC      string
+	CreatedAt       time.Time
 }

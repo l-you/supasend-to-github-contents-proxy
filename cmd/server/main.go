@@ -18,7 +18,10 @@ func main() {
 	}
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	githubClient := githubapi.NewClient(cfg.GitHubAPIURL, cfg.GitHubToken, httpClient)
+	githubClient, err := githubapi.NewClient(cfg.GitHubAPIURL, cfg.GitHubToken, httpClient)
+	if err != nil {
+		log.Fatalf("create github client: %v", err)
+	}
 
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
