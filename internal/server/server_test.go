@@ -73,6 +73,18 @@ func TestFileWebhookRejectsInvalidBase64File(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `"error":`)
 }
 
+func TestUnknownPathReturnsErrorReason(t *testing.T) {
+	handler := New(config.Config{}, nil, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/missing", nil)
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"not found"}`, rec.Body.String())
+}
+
 func TestSupasendWebhookReturnsOKTrueOnSuccess(t *testing.T) {
 	createdAt := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

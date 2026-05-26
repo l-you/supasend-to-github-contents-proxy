@@ -46,7 +46,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/webhooks/file":
 		s.handleFile(w, r)
 	default:
-		writeOK(w, http.StatusNotFound, false)
+		writeError(w, http.StatusNotFound, "not found")
 	}
 }
 
