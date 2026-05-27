@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.5.0...v0.6.0) (2026-05-27)
+
+
+### Features
+
+* debug option for errors ([a9ab4fe](https://github.com/l-you/supasend-to-github-contents-proxy/commit/a9ab4feaaeade1636c5f85c16823e4fbcfe24242))
+
+
+### Bug Fixes
+
+* **debug:** exclude debug package from default builds ([894cdf0](https://github.com/l-you/supasend-to-github-contents-proxy/commit/894cdf0c176b00689b1ce3fbca6ccd6ef8e34b60))
+
 ## [0.5.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.4.0...v0.5.0) (2026-05-27)
 
 
