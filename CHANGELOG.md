@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.5.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.4.0...v0.5.0) (2026-05-27)
+
+
+### Features
+
+* **webhooks:** add folder-scoped file captures ([2197ae3](https://github.com/l-you/supasend-to-github-contents-proxy/commit/2197ae30bc69cc42a1a3c6c1df48217b4ba38577))
+
+
+### Performance Improvements
+
+* **capture:** reduce file webhook allocation churn ([7be2b7e](https://github.com/l-you/supasend-to-github-contents-proxy/commit/7be2b7e5ced897b941948cc062d5e5ac069d0bd1))
+
 ## [0.4.0](https://github.com/l-you/supasend-to-github-contents-proxy/compare/v0.3.1...v0.4.0) (2026-05-26)
 
 
