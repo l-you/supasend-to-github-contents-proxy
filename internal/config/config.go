@@ -28,6 +28,7 @@ type Config struct {
 	DebugListenAddr   string
 	NoteDir           string
 	MaxAttachmentSize int64
+	LogClientErrors   bool
 }
 
 func Load() (Config, error) {
@@ -44,6 +45,9 @@ func Load() (Config, error) {
 		MaxAttachmentSize: defaultAttachmentBytes,
 	}
 
+	if err := cfg.loadLogClientErrors(); err != nil {
+		return Config{}, err
+	}
 	if err := cfg.loadMaxAttachmentSize(); err != nil {
 		return Config{}, err
 	}
@@ -69,6 +73,21 @@ func (cfg *Config) loadMaxAttachmentSize() error {
 	}
 
 	cfg.MaxAttachmentSize = value
+	return nil
+}
+
+func (cfg *Config) loadLogClientErrors() error {
+	raw := strings.TrimSpace(os.Getenv("LOG_CLIENT_ERRORS"))
+	if raw == "" {
+		return nil
+	}
+
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fmt.Errorf("parse LOG_CLIENT_ERRORS: %w", err)
+	}
+
+	cfg.LogClientErrors = value
 	return nil
 }
 

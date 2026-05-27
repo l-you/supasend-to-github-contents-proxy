@@ -1,14 +1,18 @@
 package server
 
 import (
+	"bytes"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/config"
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/filecapture"
+	githubapi "github.com/l-you/supasend-to-github-contents-proxy/internal/github"
 	"github.com/stretchr/testify/require"
 )
 
@@ -132,6 +136,97 @@ func TestFileWebhookRequiresAttachmentNameWhenAttachmentProvided(t *testing.T) {
 		`{"ok":false,"error":"attachment_name is required when attachment is provided"}`,
 		rec.Body.String(),
 	)
+}
+
+func TestClientErrorLoggingCanBeEnabled(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() {
+		log.SetOutput(previousLogOutput)
+	})
+
+	handler := New(config.Config{WebhookToken: "secret", LogClientErrors: true}, nil, nil)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/file",
+		strings.NewReader(`{"folder_name":"capture","text":"hello","file_name":"note.md"}`),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, logs.String(), "request error: status=400 method=POST path=/webhooks/file")
+	require.Contains(t, logs.String(), `reason="created_at is required"`)
+	require.NotContains(t, logs.String(), "secret")
+}
+
+func TestClientErrorLoggingIsDisabledByDefault(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() {
+		log.SetOutput(previousLogOutput)
+	})
+
+	handler := New(config.Config{WebhookToken: "secret"}, nil, nil)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/file",
+		strings.NewReader(`{"folder_name":"capture","text":"hello","file_name":"note.md"}`),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Empty(t, logs.String())
+}
+
+func TestCaptureTimeoutIsLogged(t *testing.T) {
+	var logs bytes.Buffer
+	previousLogOutput := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() {
+		log.SetOutput(previousLogOutput)
+	})
+
+	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	t.Cleanup(githubServer.Close)
+
+	httpClient := &http.Client{Timeout: 10 * time.Millisecond}
+	githubClient, err := githubapi.NewClient(githubServer.URL, "gh-token", httpClient)
+	require.NoError(t, err)
+	handler := New(config.Config{
+		GitHubOwner:     "owner",
+		GitHubRepo:      "repo",
+		GitHubBranch:    "main",
+		WebhookToken:    "secret",
+		NoteDir:         "Inbox/Quick Capture",
+		LogClientErrors: true,
+	}, githubClient, httpClient)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/supasend",
+		strings.NewReader(`{"text":"hello","created_at":"2026-05-26T10:00:00Z"}`),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"request timed out"}`, rec.Body.String())
+	require.Contains(t, logs.String(), "request error: status=504 method=POST path=/webhooks/supasend")
+	require.Contains(t, logs.String(), `reason="request timed out"`)
 }
 
 func TestUnknownPathReturnsErrorReason(t *testing.T) {

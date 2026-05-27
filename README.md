@@ -26,10 +26,15 @@ LISTEN_ADDR=:8080
 DEBUG_LISTEN_ADDR=
 NOTE_DIR="Inbox/Quick Capture"
 MAX_ATTACHMENT_BYTES=26214400
+LOG_CLIENT_ERRORS=false
 ```
 
 `DEBUG_LISTEN_ADDR` only works in binaries built with `-tags debug`. The Docker
 image is built without debug endpoints.
+
+Set `LOG_CLIENT_ERRORS=true` to log bad auth, wrong payloads, missing routes,
+method errors, conflicts, canceled requests, and timed out requests. Request
+bodies and tokens are not logged.
 
 Auth is always:
 

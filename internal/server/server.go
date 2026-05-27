@@ -1,9 +1,11 @@
 package server
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"path"
@@ -47,7 +49,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case "/webhooks/file":
 		s.handleFile(w, r)
 	default:
-		writeError(w, http.StatusNotFound, "not found")
+		s.writeClientError(w, r, http.StatusNotFound, "not found")
 	}
 }
 
@@ -74,28 +76,39 @@ func (s *Server) handleCapture(
 ) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		s.writeClientError(w, r, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if !validBearer(r.Header.Get("Authorization"), s.cfg.WebhookToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		s.writeClientError(w, r, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
 	capture, err := decode(r)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+		s.writeClientError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	result, err := s.captureToGitHub(r, capture)
 	if err != nil {
-		log.Printf("capture failed: %v", err)
-		if githubapi.IsPathUnavailable(err) || githubapi.IsPathExists(err) {
-			writeError(w, http.StatusConflict, err.Error())
+		if errors.Is(err, context.Canceled) {
+			s.logRequestError(r, 499, "request canceled", err)
 			return
 		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			s.logRequestError(r, http.StatusGatewayTimeout, "request timed out", err)
+			writeError(w, http.StatusGatewayTimeout, "request timed out")
+			return
+		}
+
+		if githubapi.IsPathUnavailable(err) || githubapi.IsPathExists(err) {
+			s.writeClientError(w, r, http.StatusConflict, err.Error())
+			return
+		}
+
+		s.logRequestError(r, http.StatusBadGateway, "capture failed", err)
 		writeError(w, http.StatusBadGateway, "failed to write capture")
 		return
 	}
@@ -312,6 +325,45 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	if err := json.NewEncoder(w).Encode(value); err != nil {
 		log.Printf("write response: %v", err)
 	}
+}
+
+func (s *Server) writeClientError(w http.ResponseWriter, r *http.Request, status int, message string) {
+	s.logClientError(r, status, message)
+	writeError(w, status, message)
+}
+
+func (s *Server) logClientError(r *http.Request, status int, message string) {
+	if !s.cfg.LogClientErrors {
+		return
+	}
+
+	s.logRequestError(r, status, message, nil)
+}
+
+func (s *Server) logRequestError(r *http.Request, status int, message string, err error) {
+	if err != nil {
+		log.Printf(
+			"request error: status=%d method=%s path=%s remote=%s content_length=%d reason=%q err=%v",
+			status,
+			r.Method,
+			r.URL.Path,
+			r.RemoteAddr,
+			r.ContentLength,
+			message,
+			err,
+		)
+		return
+	}
+
+	log.Printf(
+		"request error: status=%d method=%s path=%s remote=%s content_length=%d reason=%q",
+		status,
+		r.Method,
+		r.URL.Path,
+		r.RemoteAddr,
+		r.ContentLength,
+		message,
+	)
 }
 
 func writeError(w http.ResponseWriter, status int, message string) {
