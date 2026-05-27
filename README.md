@@ -23,6 +23,7 @@ Optional:
 GITHUB_BRANCH=main
 GITHUB_API_URL=https://api.github.com
 LISTEN_ADDR=:8080
+DEBUG_LISTEN_ADDR=
 NOTE_DIR="Inbox/Quick Capture"
 MAX_ATTACHMENT_BYTES=26214400
 ```
@@ -39,6 +40,18 @@ Authorization: Bearer <WEBHOOK_TOKEN>
 task test
 go run ./cmd/server
 ```
+
+## Memory E2E
+
+```sh
+task go:e2e:memory
+```
+
+This opt-in test builds the real server, runs it against a local fake GitHub API,
+sends captures through HTTP, and logs allocation/RAM counters from
+`DEBUG_LISTEN_ADDR`.
+
+Tune it with `E2E_CAPTURE_COUNT` and `E2E_ATTACHMENT_BYTES`.
 
 ## File Rules
 

@@ -42,6 +42,11 @@ tasks:
     cmds:
       - go test ./...
 
+  go:e2e:memory:
+    desc: Run opt-in real-server memory e2e test
+    cmds:
+      - go test -tags=e2e ./e2e -run TestServerMemoryCaptureE2E -count=1 -v
+
   gen:
     desc: Run all code generation
     cmds:

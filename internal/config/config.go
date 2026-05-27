@@ -25,6 +25,7 @@ type Config struct {
 	GitHubAPIURL      string
 	WebhookToken      string
 	ListenAddr        string
+	DebugListenAddr   string
 	NoteDir           string
 	MaxAttachmentSize int64
 }
@@ -38,6 +39,7 @@ func Load() (Config, error) {
 		GitHubAPIURL:      envOrDefault("GITHUB_API_URL", defaultGitHubAPIURL),
 		WebhookToken:      strings.TrimSpace(os.Getenv("WEBHOOK_TOKEN")),
 		ListenAddr:        envOrDefault("LISTEN_ADDR", defaultListenAddr),
+		DebugListenAddr:   strings.TrimSpace(os.Getenv("DEBUG_LISTEN_ADDR")),
 		NoteDir:           envOrDefault("NOTE_DIR", defaultNoteDir),
 		MaxAttachmentSize: defaultAttachmentBytes,
 	}

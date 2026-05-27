@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/config"
+	"github.com/l-you/supasend-to-github-contents-proxy/internal/debughttp"
 	githubapi "github.com/l-you/supasend-to-github-contents-proxy/internal/github"
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/server"
 )
@@ -23,6 +24,10 @@ func main() {
 		log.Fatalf("create github client: %v", err)
 	}
 
+	if cfg.DebugListenAddr != "" {
+		startDebugServer(cfg.DebugListenAddr)
+	}
+
 	srv := &http.Server{
 		Addr:              cfg.ListenAddr,
 		Handler:           server.New(cfg, githubClient, httpClient),
@@ -33,4 +38,19 @@ func main() {
 	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("listen: %v", err)
 	}
+}
+
+func startDebugServer(addr string) {
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           debughttp.NewHandler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	go func() {
+		log.Printf("debug listening on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Printf("debug listen: %v", err)
+		}
+	}()
 }
