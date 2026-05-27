@@ -1,6 +1,7 @@
 package filecapture
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -16,17 +17,26 @@ const MissingFolderNameReason = "folder_name is required because Obsidian Quick 
 	"as folder_name so separate note and attachment uploads can be matched to the same capture"
 
 type Capture struct {
-	FolderName        string
-	Text              string
-	NoteFileName      string
-	AttachmentName    string
-	AttachmentContent []byte
-	CreatedAt         string
+	FolderName       string
+	Text             string
+	NoteFileName     string
+	AttachmentName   string
+	AttachmentBase64 string
+	CreatedAt        string
 }
 
 func Decode(r io.Reader, maxAttachmentBytes int64) (Capture, error) {
+	return DecodeWithContentLength(r, maxAttachmentBytes, -1)
+}
+
+func DecodeWithContentLength(r io.Reader, maxAttachmentBytes int64, contentLength int64) (Capture, error) {
+	body, err := readPayload(r, boundedContentLength(contentLength, maxAttachmentBytes))
+	if err != nil {
+		return Capture{}, fmt.Errorf("read payload: %w", err)
+	}
+
 	var payload Payload
-	if err := json.NewDecoder(r).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return Capture{}, fmt.Errorf("decode payload: %w", err)
 	}
 
@@ -59,7 +69,6 @@ func Decode(r io.Reader, maxAttachmentBytes int64) (Capture, error) {
 		}
 	}
 
-	var attachmentContent []byte
 	switch {
 	case attachmentName == "" && attachment != "":
 		return Capture{}, errors.New("attachment_name is required when attachment is provided")
@@ -69,29 +78,100 @@ func Decode(r io.Reader, maxAttachmentBytes int64) (Capture, error) {
 		if path.Ext(attachmentName) == "" {
 			return Capture{}, errors.New("attachment_name must include a file extension")
 		}
-		content, err := base64.StdEncoding.DecodeString(attachment)
-		if err != nil {
-			return Capture{}, fmt.Errorf("decode attachment: %w", err)
+		if err := validateBase64Attachment(attachment, maxAttachmentBytes); err != nil {
+			return Capture{}, err
 		}
-		if int64(len(content)) > maxAttachmentBytes {
-			return Capture{}, fmt.Errorf("attachment exceeds max size of %d bytes", maxAttachmentBytes)
-		}
-		attachmentContent = content
 	}
 
 	return Capture{
-		FolderName:        folderName,
-		Text:              text,
-		NoteFileName:      noteFileName,
-		AttachmentName:    attachmentName,
-		AttachmentContent: attachmentContent,
-		CreatedAt:         createdAt,
+		FolderName:       folderName,
+		Text:             text,
+		NoteFileName:     noteFileName,
+		AttachmentName:   attachmentName,
+		AttachmentBase64: attachment,
+		CreatedAt:        createdAt,
 	}, nil
+}
+
+func readPayload(r io.Reader, contentLength int64) ([]byte, error) {
+	if contentLength <= 0 {
+		return io.ReadAll(r)
+	}
+	if contentLength > int64(int(^uint(0)>>1)) {
+		return nil, errors.New("payload is too large")
+	}
+
+	var b bytes.Buffer
+	b.Grow(int(contentLength))
+	_, err := b.ReadFrom(r)
+	if err != nil {
+		return nil, err
+	}
+
+	return b.Bytes(), nil
+}
+
+func boundedContentLength(contentLength int64, maxAttachmentBytes int64) int64 {
+	if contentLength <= 0 {
+		return -1
+	}
+
+	maxPayloadBytes := maxPayloadPreallocBytes(maxAttachmentBytes)
+	if maxPayloadBytes <= 0 || contentLength > maxPayloadBytes {
+		return -1
+	}
+
+	return contentLength
+}
+
+func maxPayloadPreallocBytes(maxAttachmentBytes int64) int64 {
+	const metadataBudget = 1024 * 1024
+	if maxAttachmentBytes <= 0 {
+		return metadataBudget
+	}
+
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if maxAttachmentBytes > maxInt64-2 {
+		return -1
+	}
+
+	encodedBytes := ((maxAttachmentBytes + 2) / 3) * 4
+	if encodedBytes > maxInt64-metadataBudget {
+		return -1
+	}
+
+	return encodedBytes + metadataBudget
+}
+
+func validateBase64Attachment(value string, maxBytes int64) error {
+	if strings.ContainsAny(value, "\r\n") {
+		return errors.New("attachment must be standard base64 without newlines")
+	}
+
+	var scratch [32 * 1024]byte
+	var decoded int64
+	decoder := base64.NewDecoder(base64.StdEncoding, strings.NewReader(value))
+	for {
+		n, err := decoder.Read(scratch[:])
+		decoded += int64(n)
+		if decoded > maxBytes {
+			return fmt.Errorf("attachment exceeds max size of %d bytes", maxBytes)
+		}
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+
+		return fmt.Errorf("decode attachment: %w", err)
+	}
 }
 
 func sanitizeFilename(value string) string {
 	value = path.Base(strings.ReplaceAll(strings.TrimSpace(value), "\\", "/"))
 	var b strings.Builder
+	b.Grow(len(value))
 
 	for _, r := range value {
 		switch {

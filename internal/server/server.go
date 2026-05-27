@@ -210,7 +210,7 @@ func (s *Server) fileCaptureToGitHubOnce(r *http.Request, capture captureRequest
 
 	if capture.AttachmentName != "" {
 		attachmentPath = repopath.File(s.cfg.NoteDir, capture.FolderName, capture.AttachmentName)
-		files = append(files, githubapi.File{Path: attachmentPath, Content: capture.AttachmentContent})
+		files = append(files, githubapi.File{Path: attachmentPath, Base64Content: capture.AttachmentBase64})
 	}
 
 	if capture.Text != "" {
@@ -346,6 +346,7 @@ type captureRequest struct {
 	NoteFileName      string
 	AttachmentName    string
 	AttachmentContent []byte
+	AttachmentBase64  string
 	CreatedAt         time.Time
 }
 

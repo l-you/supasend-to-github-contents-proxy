@@ -11,10 +11,8 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
-	pathpkg "path"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -85,7 +83,7 @@ func TestServerMemoryCaptureE2E(t *testing.T) {
 	forceGC(t, client, debugAddr)
 	before := readMemStats(t, client, debugAddr)
 	started := time.Now()
-	postCaptures(t, client, listenAddr, requestCount, attachmentBytes)
+	postCaptures(t, client, listenAddr, "e2e", requestCount, attachmentBytes)
 	elapsed := time.Since(started)
 	forceGC(t, client, debugAddr)
 	after := readMemStats(t, client, debugAddr)
@@ -120,40 +118,141 @@ func TestServerMemoryCaptureE2E(t *testing.T) {
 
 	require.Equal(t, requestCount, github.Commits())
 	require.Equal(t, requestCount*2, github.Files())
+
+	if profileDir := strings.TrimSpace(os.Getenv("E2E_PROFILE_DIR")); profileDir != "" {
+		runProfiledLoad(t, client, listenAddr, debugAddr, profileDir, attachmentBytes)
+	}
 }
 
-func postCaptures(t *testing.T, client *http.Client, addr string, count int, attachmentBytes int) {
+func postCaptures(
+	t *testing.T,
+	client *http.Client,
+	addr string,
+	folderPrefix string,
+	count int,
+	attachmentBytes int,
+) {
 	t.Helper()
 
 	attachment := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), attachmentBytes))
 	baseTime := time.Date(2026, 5, 26, 22, 35, 43, 0, time.FixedZone("EEST", 3*60*60))
 
 	for i := range count {
-		payload := map[string]string{
-			"folder_name":     fmt.Sprintf("e2e-%03d", i),
-			"created_at":      baseTime.Add(time.Duration(i) * time.Second).Format(time.RFC3339),
-			"text":            strings.Repeat("quick capture ", 16),
-			"file_name":       "note.md",
-			"attachment_name": "attachment.txt",
-			"attachment":      attachment,
-		}
-		body, err := json.Marshal(payload)
-		require.NoError(t, err)
-
-		req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/webhooks/file", bytes.NewReader(body))
-		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer secret")
-		req.Header.Set("Content-Type", "application/json")
-
-		resp, err := client.Do(req)
-		require.NoError(t, err)
-		responseBody, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-
-		require.Equalf(t, http.StatusOK, resp.StatusCode, "response: %s", responseBody)
-		require.JSONEq(t, `{"ok":true}`, string(responseBody))
+		postCapture(t, client, addr, folderPrefix, i, baseTime, attachment)
 	}
+}
+
+func runProfiledLoad(
+	t *testing.T,
+	client *http.Client,
+	listenAddr string,
+	debugAddr string,
+	profileDir string,
+	attachmentBytes int,
+) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(profileDir, 0o755))
+
+	seconds := envInt("E2E_CPU_PROFILE_SECONDS", 10)
+	profileClient := &http.Client{Timeout: time.Duration(seconds+10) * time.Second}
+	cpuPath := filepath.Join(profileDir, "cpu.pb.gz")
+	cpuDone := make(chan error, 1)
+	go func() {
+		url := fmt.Sprintf("http://%s/debug/pprof/profile?seconds=%d", debugAddr, seconds)
+		cpuDone <- downloadProfile(profileClient, url, cpuPath)
+	}()
+
+	attachment := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), attachmentBytes))
+	baseTime := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
+	timeout := time.After(time.Duration(seconds+5) * time.Second)
+	captures := 0
+
+	for {
+		select {
+		case err := <-cpuDone:
+			require.NoError(t, err)
+			writeRuntimeProfiles(t, profileClient, debugAddr, profileDir)
+			t.Logf("profiles: dir=%s cpu=%s captures=%d", profileDir, cpuPath, captures)
+			return
+		case <-timeout:
+			t.Fatalf("cpu profile did not finish after %d seconds", seconds)
+		default:
+			postCapture(t, client, listenAddr, "profile", captures, baseTime, attachment)
+			captures++
+		}
+	}
+}
+
+func postCapture(
+	t *testing.T,
+	client *http.Client,
+	addr string,
+	folderPrefix string,
+	index int,
+	baseTime time.Time,
+	attachment string,
+) {
+	t.Helper()
+
+	payload := map[string]string{
+		"folder_name":     fmt.Sprintf("%s-%06d", folderPrefix, index),
+		"created_at":      baseTime.Add(time.Duration(index) * time.Second).Format(time.RFC3339),
+		"text":            strings.Repeat("quick capture ", 16),
+		"file_name":       "note.md",
+		"attachment_name": "attachment.txt",
+		"attachment":      attachment,
+	}
+	body, err := json.Marshal(payload)
+	require.NoError(t, err)
+
+	req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/webhooks/file", bytes.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Authorization", "Bearer secret")
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	responseBody, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	require.Equalf(t, http.StatusOK, resp.StatusCode, "response: %s", responseBody)
+	require.JSONEq(t, `{"ok":true}`, string(responseBody))
+}
+
+func writeRuntimeProfiles(t *testing.T, client *http.Client, debugAddr string, profileDir string) {
+	t.Helper()
+
+	for _, profile := range []string{"allocs", "heap"} {
+		url := fmt.Sprintf("http://%s/debug/pprof/%s?gc=1", debugAddr, profile)
+		path := filepath.Join(profileDir, profile+".pb.gz")
+		require.NoError(t, downloadProfile(client, url, path))
+	}
+}
+
+func downloadProfile(client *http.Client, url string, path string) error {
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("download profile %s: %s", url, resp.Status)
+	}
+
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = file.Close()
+	}()
+
+	_, err = io.Copy(file, resp.Body)
+	return err
 }
 
 func repoRoot(t *testing.T) string {
@@ -274,185 +373,6 @@ func formatBytesDelta(after uint64, before uint64) string {
 	}
 
 	return "-" + formatBytes(before-after)
-}
-
-type fakeGitHub struct {
-	*httptest.Server
-
-	mu          sync.Mutex
-	refSHA      string
-	blobCount   int
-	treeCount   int
-	commitCount int
-	apiRequests int
-	occupied    map[string]struct{}
-	commits     map[string]string
-	pending     map[string][]string
-}
-
-func newFakeGitHub(t *testing.T) *fakeGitHub {
-	t.Helper()
-
-	github := &fakeGitHub{
-		refSHA:   "commit-0",
-		occupied: make(map[string]struct{}),
-		commits: map[string]string{
-			"commit-0": "tree-0",
-		},
-		pending: make(map[string][]string),
-	}
-	github.Server = httptest.NewServer(http.HandlerFunc(github.handle))
-
-	return github
-}
-
-func (g *fakeGitHub) APIRequests() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	return g.apiRequests
-}
-
-func (g *fakeGitHub) Commits() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	return g.commitCount
-}
-
-func (g *fakeGitHub) Files() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	return len(g.occupied)
-}
-
-func (g *fakeGitHub) handle(w http.ResponseWriter, r *http.Request) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-
-	g.apiRequests++
-
-	switch {
-	case r.Method == http.MethodGet && r.URL.Path == "/repos/owner/repo/git/ref/heads/main":
-		writeJSON(w, map[string]any{"object": map[string]string{"sha": g.refSHA}})
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/git/commits/"):
-		g.handleGetCommit(w, r)
-	case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/repos/owner/repo/git/trees/"):
-		g.handleGetTree(w)
-	case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/blobs":
-		g.blobCount++
-		writeJSON(w, map[string]string{"sha": fmt.Sprintf("blob-%d", g.blobCount)})
-	case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/trees":
-		g.handleCreateTree(w, r)
-	case r.Method == http.MethodPost && r.URL.Path == "/repos/owner/repo/git/commits":
-		g.handleCreateCommit(w, r)
-	case r.Method == http.MethodPatch && r.URL.Path == "/repos/owner/repo/git/refs/heads/main":
-		g.handleUpdateRef(w, r)
-	default:
-		http.Error(w, "unexpected GitHub request: "+r.Method+" "+r.URL.RequestURI(), http.StatusNotFound)
-	}
-}
-
-func (g *fakeGitHub) handleGetCommit(w http.ResponseWriter, r *http.Request) {
-	sha := pathpkg.Base(r.URL.Path)
-	treeSHA, ok := g.commits[sha]
-	if !ok {
-		http.Error(w, "commit not found", http.StatusNotFound)
-		return
-	}
-
-	writeJSON(w, map[string]any{"sha": sha, "tree": map[string]string{"sha": treeSHA}})
-}
-
-func (g *fakeGitHub) handleGetTree(w http.ResponseWriter) {
-	entries := make([]map[string]string, 0, len(g.occupied))
-	for occupiedPath := range g.occupied {
-		entries = append(entries, map[string]string{"path": occupiedPath, "type": "blob"})
-	}
-
-	writeJSON(w, map[string]any{"sha": "tree-current", "tree": entries})
-}
-
-func (g *fakeGitHub) handleCreateTree(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		Tree []struct {
-			Path string `json:"path"`
-		} `json:"tree"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	paths := make([]string, 0, len(request.Tree))
-	for _, entry := range request.Tree {
-		paths = append(paths, entry.Path)
-	}
-
-	g.treeCount++
-	treeSHA := fmt.Sprintf("tree-%d", g.treeCount)
-	g.pending[treeSHA] = paths
-
-	writeJSON(w, map[string]string{"sha": treeSHA})
-}
-
-func (g *fakeGitHub) handleCreateCommit(w http.ResponseWriter, r *http.Request) {
-	var request map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	treeSHA, ok := commitTreeSHA(request["tree"])
-	if !ok {
-		http.Error(w, "missing commit tree", http.StatusBadRequest)
-		return
-	}
-
-	g.commitCount++
-	commitSHA := fmt.Sprintf("commit-%d", g.commitCount)
-	g.commits[commitSHA] = treeSHA
-	for _, committedPath := range g.pending[treeSHA] {
-		g.occupied[committedPath] = struct{}{}
-	}
-
-	writeJSON(w, map[string]any{
-		"sha":  commitSHA,
-		"tree": map[string]string{"sha": treeSHA},
-	})
-}
-
-func commitTreeSHA(value any) (string, bool) {
-	switch tree := value.(type) {
-	case string:
-		return tree, tree != ""
-	case map[string]any:
-		sha, ok := tree["sha"].(string)
-		return sha, ok && sha != ""
-	default:
-		return "", false
-	}
-}
-
-func (g *fakeGitHub) handleUpdateRef(w http.ResponseWriter, r *http.Request) {
-	var request struct {
-		SHA string `json:"sha"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-	g.refSHA = request.SHA
-
-	writeJSON(w, map[string]any{
-		"ref":    "refs/heads/main",
-		"object": map[string]string{"sha": request.SHA},
-	})
-}
-
-func writeJSON(w http.ResponseWriter, value any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(value)
 }
 
 type lockedBuffer struct {

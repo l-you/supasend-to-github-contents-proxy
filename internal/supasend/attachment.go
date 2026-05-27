@@ -92,6 +92,7 @@ func filenameFromResponse(rawURL string, header http.Header) string {
 func sanitizeFilename(value string) string {
 	value = path.Base(strings.ReplaceAll(value, "\\", "/"))
 	var b strings.Builder
+	b.Grow(len(value))
 
 	for _, r := range value {
 		switch {

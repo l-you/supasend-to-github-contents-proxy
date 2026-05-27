@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -14,48 +13,39 @@ func TestCommitFilesCreatesOneGitCommit(t *testing.T) {
 	var blobContents []string
 	var updatedRef updateRefRequest
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.Equal(t, "Bearer token", r.Header.Get("Authorization"))
-
-		switch r.Method + " " + r.URL.Path {
-		case "GET /repos/owner/repo/git/ref/heads/main":
-			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
-		case "GET /repos/owner/repo/git/commits/base":
-			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
-		case "POST /repos/owner/repo/git/blobs":
+	server := newGitHubTestServer(t, baseGitHubRoutes(githubTestRoutes{
+		"POST /repos/owner/repo/git/blobs": func(w http.ResponseWriter, r *http.Request) {
 			var request blobRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			content, err := base64.StdEncoding.DecodeString(request.Content)
 			require.NoError(t, err)
 			blobContents = append(blobContents, string(content))
-			writeTestJSON(t, w, map[string]string{"sha": "blob-" + string(rune('0'+len(blobContents)))})
-		case "POST /repos/owner/repo/git/trees":
+			writeTestJSON(w, map[string]string{"sha": "blob-" + string(rune('0'+len(blobContents)))})
+		},
+		"POST /repos/owner/repo/git/trees": func(w http.ResponseWriter, r *http.Request) {
 			var request treeRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			require.Equal(t, "tree-base", request.BaseTree)
 			require.Len(t, request.Tree, 2)
-			writeTestJSON(t, w, map[string]string{"sha": "tree-new"})
-		case "POST /repos/owner/repo/git/commits":
+			writeTestJSON(w, map[string]string{"sha": "tree-new"})
+		},
+		"POST /repos/owner/repo/git/commits": func(w http.ResponseWriter, r *http.Request) {
 			var request createCommitRequest
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
 			require.Equal(t, "Add Supasend capture", request.Message)
 			require.Equal(t, "tree-new", request.Tree)
 			require.Equal(t, []string{"base"}, request.Parents)
-			writeTestJSON(t, w, commitResponseFixture("new", "tree-new"))
-		case "PATCH /repos/owner/repo/git/refs/heads/main":
+			writeTestJSON(w, commitResponseFixture("new", "tree-new"))
+		},
+		"PATCH /repos/owner/repo/git/refs/heads/main": func(w http.ResponseWriter, r *http.Request) {
 			require.NoError(t, json.NewDecoder(r.Body).Decode(&updatedRef))
-			writeTestJSON(t, w, map[string]string{"ref": "refs/heads/main"})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
+			writeTestJSON(w, map[string]string{"ref": "refs/heads/main"})
+		},
 	}))
-	defer server.Close()
-
-	client, err := NewClient(server.URL, "token", server.Client())
-	require.NoError(t, err)
+	client := newGitHubTestClient(t, server)
 
 	result, err := client.CommitFiles(t.Context(), "owner", "repo", "main", "Add Supasend capture", []File{
-		{Path: "Attachments/Supasend/a.png", Content: []byte("attachment")},
+		{Path: "Attachments/Supasend/a.png", Base64Content: base64.StdEncoding.EncodeToString([]byte("attachment"))},
 		{Path: "Inbox/Quick Capture/a.md", Content: []byte("note")},
 	}, CommitOptions{})
 
@@ -66,29 +56,19 @@ func TestCommitFilesCreatesOneGitCommit(t *testing.T) {
 }
 
 func TestUniquePathsIncrementsDuplicateFilenames(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method + " " + r.URL.Path {
-		case "GET /repos/owner/repo/git/ref/heads/main":
-			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
-		case "GET /repos/owner/repo/git/commits/base":
-			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
-		case "GET /repos/owner/repo/git/trees/tree-base":
+	server := newGitHubTestServer(t, baseGitHubRoutes(githubTestRoutes{
+		"GET /repos/owner/repo/git/trees/tree-base": func(w http.ResponseWriter, r *http.Request) {
 			require.Equal(t, "1", r.URL.Query().Get("recursive"))
-			writeTestJSON(t, w, map[string]any{
+			writeTestJSON(w, map[string]any{
 				"sha": "tree-base",
 				"tree": []map[string]string{
 					{"path": "Inbox/Quick Capture/2026-05-26T10-00-00.md", "type": "blob"},
 					{"path": "Inbox/Quick Capture/2026-05-26T10-00-00-1.md", "type": "blob"},
 				},
 			})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
+		},
 	}))
-	defer server.Close()
-
-	client, err := NewClient(server.URL, "token", server.Client())
-	require.NoError(t, err)
+	client := newGitHubTestClient(t, server)
 
 	paths, err := client.UniquePaths(t.Context(), "owner", "repo", "main", []string{
 		"Inbox/Quick Capture/2026-05-26T10-00-00.md",
@@ -119,28 +99,18 @@ func TestUniquePathsReturnsErrorAfterMaxSuffix(t *testing.T) {
 }
 
 func TestUniqueDirectoryIncrementsDuplicateFolders(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method + " " + r.URL.Path {
-		case "GET /repos/owner/repo/git/ref/heads/main":
-			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
-		case "GET /repos/owner/repo/git/commits/base":
-			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
-		case "GET /repos/owner/repo/git/trees/tree-base":
-			writeTestJSON(t, w, map[string]any{
+	server := newGitHubTestServer(t, baseGitHubRoutes(githubTestRoutes{
+		"GET /repos/owner/repo/git/trees/tree-base": func(w http.ResponseWriter, _ *http.Request) {
+			writeTestJSON(w, map[string]any{
 				"sha": "tree-base",
 				"tree": []map[string]string{
 					{"path": "Inbox/receipt/receipt.md", "type": "blob"},
 					{"path": "Inbox/receipt-1/receipt-1.md", "type": "blob"},
 				},
 			})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
+		},
 	}))
-	defer server.Close()
-
-	client, err := NewClient(server.URL, "token", server.Client())
-	require.NoError(t, err)
+	client := newGitHubTestClient(t, server)
 
 	dir, err := client.UniqueDirectory(t.Context(), "owner", "repo", "main", "Inbox/receipt", 5)
 
@@ -149,29 +119,18 @@ func TestUniqueDirectoryIncrementsDuplicateFolders(t *testing.T) {
 }
 
 func TestCommitFilesRejectExistingReturnsErrorForExistingPath(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method + " " + r.URL.Path {
-		case "GET /repos/owner/repo/git/ref/heads/main":
-			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
-		case "GET /repos/owner/repo/git/commits/base":
-			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
-		case "GET /repos/owner/repo/git/trees/tree-base":
-			writeTestJSON(t, w, map[string]any{
-				"sha": "tree-base",
-				"tree": []map[string]string{
-					{"path": "Inbox/run-1/note.md", "type": "blob"},
-				},
+	server := newGitHubTestServer(t, baseGitHubRoutes(githubTestRoutes{
+		"GET /repos/owner/repo/contents/Inbox/run-1/note.md": func(w http.ResponseWriter, r *http.Request) {
+			require.Equal(t, "main", r.URL.Query().Get("ref"))
+			writeTestJSON(w, map[string]string{
+				"path": "Inbox/run-1/note.md",
+				"type": "file",
 			})
-		default:
-			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
-		}
+		},
 	}))
-	defer server.Close()
+	client := newGitHubTestClient(t, server)
 
-	client, err := NewClient(server.URL, "token", server.Client())
-	require.NoError(t, err)
-
-	_, err = client.CommitFiles(
+	_, err := client.CommitFiles(
 		t.Context(),
 		"owner",
 		"repo",
@@ -183,45 +142,4 @@ func TestCommitFilesRejectExistingReturnsErrorForExistingPath(t *testing.T) {
 
 	require.Error(t, err)
 	require.True(t, IsPathExists(err))
-}
-
-func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {
-	t.Helper()
-	w.Header().Set("Content-Type", "application/json")
-	require.NoError(t, json.NewEncoder(w).Encode(value))
-}
-
-func commitResponseFixture(sha string, treeSHA string) map[string]any {
-	return map[string]any{
-		"sha":  sha,
-		"tree": map[string]string{"sha": treeSHA},
-	}
-}
-
-type blobRequest struct {
-	Content  string `json:"content"`
-	Encoding string `json:"encoding"`
-}
-
-type treeRequest struct {
-	BaseTree string          `json:"base_tree"`
-	Tree     []treeEntryItem `json:"tree"`
-}
-
-type treeEntryItem struct {
-	Path string `json:"path"`
-	Mode string `json:"mode"`
-	Type string `json:"type"`
-	SHA  string `json:"sha"`
-}
-
-type updateRefRequest struct {
-	SHA   string `json:"sha"`
-	Force bool   `json:"force"`
-}
-
-type createCommitRequest struct {
-	Message string   `json:"message"`
-	Tree    string   `json:"tree"`
-	Parents []string `json:"parents"`
 }

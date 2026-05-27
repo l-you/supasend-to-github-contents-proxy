@@ -3,9 +3,12 @@ package github
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
@@ -13,12 +16,16 @@ import (
 )
 
 type Client struct {
-	git *gh.GitService
+	git          *gh.GitService
+	repositories *gh.RepositoriesService
+	httpClient   *http.Client
+	baseURL      string
 }
 
 type File struct {
-	Path    string
-	Content []byte
+	Path          string
+	Content       []byte
+	Base64Content string
 }
 
 type CommitResult struct {
@@ -51,8 +58,10 @@ func NewClient(apiURL string, token string, httpClient *http.Client) (*Client, e
 	if httpClient != nil {
 		options = append(options, gh.WithHTTPClient(httpClient))
 	}
+	baseAPIURL := "https://api.github.com/"
 	if !isDefaultAPIURL(apiURL) {
 		baseURL := ensureTrailingSlash(apiURL)
+		baseAPIURL = baseURL
 		options = append(options, gh.WithURLs(&baseURL, nil))
 	}
 
@@ -61,7 +70,12 @@ func NewClient(apiURL string, token string, httpClient *http.Client) (*Client, e
 		return nil, fmt.Errorf("create github client: %w", err)
 	}
 
-	return &Client{git: client.Git}, nil
+	return &Client{
+		git:          client.Git,
+		repositories: client.Repositories,
+		httpClient:   client.Client(),
+		baseURL:      baseAPIURL,
+	}, nil
 }
 
 func (c *Client) CommitFiles(
@@ -89,17 +103,14 @@ func (c *Client) CommitFiles(
 
 	baseTreeSHA := baseCommit.GetTree().GetSHA()
 	if options.RejectExisting {
-		if err := c.rejectExistingPaths(ctx, owner, repo, baseTreeSHA, files); err != nil {
+		if err := c.rejectExistingPaths(ctx, owner, repo, branch, files); err != nil {
 			return CommitResult{}, err
 		}
 	}
 
 	treeEntries := make([]*gh.TreeEntry, 0, len(files))
 	for _, file := range files {
-		blob, _, err := c.git.CreateBlob(ctx, owner, repo, gh.Blob{
-			Content:  gh.Ptr(base64.StdEncoding.EncodeToString(file.Content)),
-			Encoding: gh.Ptr("base64"),
-		})
+		blobSHA, err := c.createBlob(ctx, owner, repo, file)
 		if err != nil {
 			return CommitResult{}, err
 		}
@@ -108,7 +119,7 @@ func (c *Client) CommitFiles(
 			Path: gh.Ptr(file.Path),
 			Mode: gh.Ptr("100644"),
 			Type: gh.Ptr("blob"),
-			SHA:  gh.Ptr(blob.GetSHA()),
+			SHA:  gh.Ptr(blobSHA),
 		})
 	}
 
@@ -135,6 +146,130 @@ func (c *Client) CommitFiles(
 	}
 
 	return CommitResult{SHA: commit.GetSHA()}, nil
+}
+
+func (f File) encodedContent() string {
+	if f.Base64Content != "" {
+		return f.Base64Content
+	}
+
+	return base64.StdEncoding.EncodeToString(f.Content)
+}
+
+func (c *Client) createBlob(ctx context.Context, owner string, repo string, file File) (string, error) {
+	req, err := c.newJSONRequest(
+		ctx,
+		http.MethodPost,
+		repoEndpoint(owner, repo, "git/blobs"),
+		base64BlobBody(file.encodedContent()),
+	)
+	if err != nil {
+		return "", err
+	}
+
+	var response struct {
+		SHA string `json:"sha"`
+	}
+	if err := c.do(req, &response); err != nil {
+		return "", err
+	}
+	if response.SHA == "" {
+		return "", errors.New("create blob: missing sha")
+	}
+
+	return response.SHA, nil
+}
+
+func (c *Client) newJSONRequest(
+	ctx context.Context,
+	method string,
+	endpoint string,
+	body io.Reader,
+) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.baseURL, "/")+"/"+endpoint, body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+
+	return req, nil
+}
+
+func (c *Client) do(req *http.Request, target any) error {
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		_ = resp.Body.Close()
+	}()
+
+	if err := gh.CheckResponse(resp); err != nil {
+		return err
+	}
+	if target == nil {
+		return nil
+	}
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return fmt.Errorf("decode github response: %w", err)
+	}
+
+	return nil
+}
+
+func repoEndpoint(owner string, repo string, endpoint string) string {
+	return "repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/" + endpoint
+}
+
+func base64BlobBody(content string) io.Reader {
+	return &base64BlobReader{content: content}
+}
+
+type base64BlobReader struct {
+	content string
+	part    int
+	offset  int
+}
+
+func (r *base64BlobReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	n := 0
+	for n < len(p) && r.part < 3 {
+		part := r.currentPart()
+		if r.offset >= len(part) {
+			r.part++
+			r.offset = 0
+			continue
+		}
+
+		copied := copy(p[n:], part[r.offset:])
+		r.offset += copied
+		n += copied
+	}
+	if n > 0 {
+		return n, nil
+	}
+
+	return 0, io.EOF
+}
+
+func (r *base64BlobReader) currentPart() string {
+	switch r.part {
+	case 0:
+		return `{"content":"`
+	case 1:
+		return r.content
+	case 2:
+		return `","encoding":"base64"}`
+	default:
+		return ""
+	}
 }
 
 func (c *Client) UniquePaths(
@@ -202,27 +337,60 @@ func (c *Client) rejectExistingPaths(
 	ctx context.Context,
 	owner string,
 	repo string,
-	treeSHA string,
+	branch string,
 	files []File,
 ) error {
-	occupied, err := c.occupiedPathsForTree(ctx, owner, repo, treeSHA)
-	if err != nil {
-		return err
+	var fixed [4]string
+	paths := fixed[:0]
+	if len(files) > len(fixed) {
+		paths = make([]string, 0, len(files))
 	}
 
-	seen := make(map[string]struct{}, len(files))
-	for _, file := range files {
+	for i, file := range files {
 		cleanPath := path.Clean(file.Path)
-		if _, exists := occupied[cleanPath]; exists {
+		for _, previous := range files[:i] {
+			if path.Clean(previous.Path) == cleanPath {
+				return PathExistsError{Path: cleanPath}
+			}
+		}
+		paths = append(paths, cleanPath)
+	}
+
+	if len(paths) == 0 {
+		return nil
+	}
+
+	for _, cleanPath := range paths {
+		exists, err := c.pathExists(ctx, owner, repo, branch, cleanPath)
+		if err != nil {
+			return err
+		}
+		if exists {
 			return PathExistsError{Path: cleanPath}
 		}
-		if _, exists := seen[cleanPath]; exists {
-			return PathExistsError{Path: cleanPath}
-		}
-		seen[cleanPath] = struct{}{}
 	}
 
 	return nil
+}
+
+func (c *Client) pathExists(
+	ctx context.Context,
+	owner string,
+	repo string,
+	branch string,
+	cleanPath string,
+) (bool, error) {
+	_, _, _, err := c.repositories.GetContents(ctx, owner, repo, cleanPath, &gh.RepositoryContentGetOptions{
+		Ref: branch,
+	})
+	if err == nil {
+		return true, nil
+	}
+	if isNotFound(err) {
+		return false, nil
+	}
+
+	return false, err
 }
 
 func (c *Client) occupiedPathsForTree(
@@ -252,6 +420,15 @@ func isRetryable(err error) bool {
 	}
 
 	return responseErr.Response.StatusCode == http.StatusConflict
+}
+
+func isNotFound(err error) bool {
+	var responseErr *gh.ErrorResponse
+	if !errors.As(err, &responseErr) || responseErr.Response == nil {
+		return false
+	}
+
+	return responseErr.Response.StatusCode == http.StatusNotFound
 }
 
 func IsRetryable(err error) bool {

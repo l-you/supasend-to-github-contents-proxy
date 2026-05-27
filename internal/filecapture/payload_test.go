@@ -49,7 +49,7 @@ func TestDecodeAcceptsAttachmentPayload(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "capture", capture.FolderName)
 	require.Equal(t, "receipt.jpg", capture.AttachmentName)
-	require.Equal(t, []byte("hi"), capture.AttachmentContent)
+	require.Equal(t, "aGk=", capture.AttachmentBase64)
 }
 
 func TestDecodeRejectsMissingContent(t *testing.T) {
@@ -88,4 +88,16 @@ func TestDecodeRequiresAttachmentFilenameExtension(t *testing.T) {
 	)
 
 	require.EqualError(t, err, "attachment_name must include a file extension")
+}
+
+func TestDecodeRejectsOversizedAttachment(t *testing.T) {
+	_, err := Decode(
+		strings.NewReader(
+			`{"folder_name":"capture","created_at":"2026-05-26T10:00:00Z",`+
+				`"attachment_name":"receipt.txt","attachment":"aGk="}`,
+		),
+		1,
+	)
+
+	require.EqualError(t, err, "attachment exceeds max size of 1 bytes")
 }

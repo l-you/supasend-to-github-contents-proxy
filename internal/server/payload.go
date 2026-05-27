@@ -29,7 +29,7 @@ func decodeFileCapture(
 	r *http.Request,
 	maxAttachmentBytes int64,
 ) (captureRequest, error) {
-	capture, err := filecapture.Decode(r.Body, maxAttachmentBytes)
+	capture, err := filecapture.DecodeWithContentLength(r.Body, maxAttachmentBytes, r.ContentLength)
 	if err != nil {
 		return captureRequest{}, err
 	}
@@ -39,13 +39,13 @@ func decodeFileCapture(
 	}
 
 	return captureRequest{
-		Source:            "file",
-		Text:              capture.Text,
-		FolderName:        capture.FolderName,
-		NoteFileName:      capture.NoteFileName,
-		AttachmentName:    capture.AttachmentName,
-		AttachmentContent: capture.AttachmentContent,
-		CreatedAt:         createdAt,
+		Source:           "file",
+		Text:             capture.Text,
+		FolderName:       capture.FolderName,
+		NoteFileName:     capture.NoteFileName,
+		AttachmentName:   capture.AttachmentName,
+		AttachmentBase64: capture.AttachmentBase64,
+		CreatedAt:        createdAt,
 	}, nil
 }
 
