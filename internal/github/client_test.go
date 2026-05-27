@@ -57,7 +57,7 @@ func TestCommitFilesCreatesOneGitCommit(t *testing.T) {
 	result, err := client.CommitFiles(t.Context(), "owner", "repo", "main", "Add Supasend capture", []File{
 		{Path: "Attachments/Supasend/a.png", Content: []byte("attachment")},
 		{Path: "Inbox/Quick Capture/a.md", Content: []byte("note")},
-	})
+	}, CommitOptions{})
 
 	require.NoError(t, err)
 	require.Equal(t, "new", result.SHA)
@@ -146,6 +146,43 @@ func TestUniqueDirectoryIncrementsDuplicateFolders(t *testing.T) {
 
 	require.NoError(t, err)
 	require.Equal(t, "Inbox/receipt-2", dir)
+}
+
+func TestCommitFilesRejectExistingReturnsErrorForExistingPath(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "GET /repos/owner/repo/git/ref/heads/main":
+			writeTestJSON(t, w, map[string]any{"object": map[string]string{"sha": "base"}})
+		case "GET /repos/owner/repo/git/commits/base":
+			writeTestJSON(t, w, commitResponseFixture("base", "tree-base"))
+		case "GET /repos/owner/repo/git/trees/tree-base":
+			writeTestJSON(t, w, map[string]any{
+				"sha": "tree-base",
+				"tree": []map[string]string{
+					{"path": "Inbox/run-1/note.md", "type": "blob"},
+				},
+			})
+		default:
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	client, err := NewClient(server.URL, "token", server.Client())
+	require.NoError(t, err)
+
+	_, err = client.CommitFiles(
+		t.Context(),
+		"owner",
+		"repo",
+		"main",
+		"Add file capture",
+		[]File{{Path: "Inbox/run-1/note.md", Content: []byte("note")}},
+		CommitOptions{RejectExisting: true},
+	)
+
+	require.Error(t, err)
+	require.True(t, IsPathExists(err))
 }
 
 func writeTestJSON(t *testing.T, w http.ResponseWriter, value any) {

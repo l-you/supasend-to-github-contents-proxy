@@ -42,31 +42,29 @@ go run ./cmd/server
 
 ## File Rules
 
-Without attachment:
+Supasend captures keep the Supasend flow.
+
+Custom `/webhooks/file` captures require `folder_name`. Obsidian Quick Capture can
+save a note and an attachment with the same filename in the same folder, so the
+service cannot safely infer which files belong to one capture from filenames
+alone. Use the Apple iOS Shortcut automation start time as `folder_name`.
+
+Custom notes and attachments are written into the same folder:
 
 ```text
-<NOTE_DIR>/<file_name or created_at>.md
+<NOTE_DIR>/<folder_name>/<file_name>
+<NOTE_DIR>/<folder_name>/<attachment_name>
 ```
 
-If the note exists, the service tries `-1`, `-2`, up to `-5` before `.md`.
-If all names exist, it returns `409` with `{"ok": false, "error": "reason"}`.
+Note filenames must end with `.md`.
 
-With attachment:
+If a target file already exists, the service returns `409` with
+`{"ok": false, "error": "reason"}`. It does not create suffixes.
 
-```text
-<NOTE_DIR>/<name>/<name>.md
-<NOTE_DIR>/<name>/<name><attachment extension>
-```
-
-If the folder exists, the service tries folder suffixes `-1` through `-5`.
-The note and attachment use the same final folder name, so links do not break.
-
-Example duplicate:
-
-```text
-Inbox/Quick Capture/receipt-1/receipt-1.md
-Inbox/Quick Capture/receipt-1/receipt-1.jpg
-```
+Created notes include `created_at` in Obsidian properties as
+`YYYY-MM-DD HH:MM:SS`, preserving the wall-clock time from the sent timestamp.
+If the note text already has frontmatter with `created_at`, the service keeps
+the existing value.
 
 ## Supasend Endpoint
 
@@ -80,36 +78,53 @@ Inbox/Quick Capture/receipt-1/receipt-1.jpg
 }
 ```
 
-`text` is required. `shared_url`, `created_at`, and `due_date_utc` are optional.
-If `created_at` is missing, the server time is used.
+`text` and `created_at` are required. `shared_url` is optional. `created_at`
+must be RFC3339 / ISO 8601, for example `2026-05-26T10:00:00Z`.
 
 ## Custom File Endpoint
 
 `POST /webhooks/file`
 
+Note:
+
 ```json
 {
+  "folder_name": "2026-05-27T10-00-00",
+  "created_at": "2026-05-26T10:00:00Z",
   "text": "receipt",
-  "file_name": "receipt-note"
+  "file_name": "receipt.md"
 }
 ```
 
-`text` is required. `file_name` is optional. `.md` may be included or omitted.
-
-Optional attachment:
+Attachment:
 
 ```json
 {
-  "text": "receipt",
-  "file_name": "receipt-note",
+  "folder_name": "2026-05-27T10-00-00",
+  "created_at": "2026-05-26T10:00:00Z",
   "attachment_name": "receipt.txt",
-  "attachment": "aGVsbG8K",
-  "attachment_content_type": "text/plain"
+  "attachment": "aGVsbG8K"
 }
 ```
 
-`attachment` is base64 encoded file content. If you send an attachment, send both
-`attachment_name` and `attachment`.
+Combined note and attachment:
+
+```json
+{
+  "folder_name": "2026-05-27T10-00-00",
+  "created_at": "2026-05-26T10:00:00Z",
+  "text": "receipt",
+  "file_name": "receipt.md",
+  "attachment_name": "receipt.txt",
+  "attachment": "aGVsbG8K"
+}
+```
+
+`folder_name` and `created_at` are always required. `created_at` must be RFC3339
+/ ISO 8601. Send either note fields, attachment fields, or both. Notes require
+`text` and `file_name`; `file_name` must end with `.md`. Attachments require
+`attachment_name` and `attachment`; `attachment_name` must include an extension.
+`attachment` is base64 encoded file content.
 
 ## Response
 

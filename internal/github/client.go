@@ -25,6 +25,10 @@ type CommitResult struct {
 	SHA string
 }
 
+type CommitOptions struct {
+	RejectExisting bool
+}
+
 type PathUnavailableError struct {
 	Path     string
 	MaxIndex int
@@ -32,6 +36,14 @@ type PathUnavailableError struct {
 
 func (e PathUnavailableError) Error() string {
 	return fmt.Sprintf("no available path for %q after suffix -%d", e.Path, e.MaxIndex)
+}
+
+type PathExistsError struct {
+	Path string
+}
+
+func (e PathExistsError) Error() string {
+	return fmt.Sprintf("target path %q already exists", e.Path)
 }
 
 func NewClient(apiURL string, token string, httpClient *http.Client) (*Client, error) {
@@ -59,6 +71,7 @@ func (c *Client) CommitFiles(
 	branch string,
 	message string,
 	files []File,
+	options CommitOptions,
 ) (CommitResult, error) {
 	if len(files) == 0 {
 		return CommitResult{}, errors.New("at least one file is required")
@@ -72,6 +85,13 @@ func (c *Client) CommitFiles(
 	baseCommit, _, err := c.git.GetCommit(ctx, owner, repo, ref.GetObject().GetSHA())
 	if err != nil {
 		return CommitResult{}, err
+	}
+
+	baseTreeSHA := baseCommit.GetTree().GetSHA()
+	if options.RejectExisting {
+		if err := c.rejectExistingPaths(ctx, owner, repo, baseTreeSHA, files); err != nil {
+			return CommitResult{}, err
+		}
 	}
 
 	treeEntries := make([]*gh.TreeEntry, 0, len(files))
@@ -92,7 +112,6 @@ func (c *Client) CommitFiles(
 		})
 	}
 
-	baseTreeSHA := baseCommit.GetTree().GetSHA()
 	tree, _, err := c.git.CreateTree(ctx, owner, repo, baseTreeSHA, treeEntries)
 	if err != nil {
 		return CommitResult{}, err
@@ -176,11 +195,46 @@ func (c *Client) OccupiedPaths(
 		return nil, err
 	}
 
-	tree, _, err := c.git.GetTree(ctx, owner, repo, baseCommit.GetTree().GetSHA(), true)
+	return c.occupiedPathsForTree(ctx, owner, repo, baseCommit.GetTree().GetSHA())
+}
+
+func (c *Client) rejectExistingPaths(
+	ctx context.Context,
+	owner string,
+	repo string,
+	treeSHA string,
+	files []File,
+) error {
+	occupied, err := c.occupiedPathsForTree(ctx, owner, repo, treeSHA)
+	if err != nil {
+		return err
+	}
+
+	seen := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		cleanPath := path.Clean(file.Path)
+		if _, exists := occupied[cleanPath]; exists {
+			return PathExistsError{Path: cleanPath}
+		}
+		if _, exists := seen[cleanPath]; exists {
+			return PathExistsError{Path: cleanPath}
+		}
+		seen[cleanPath] = struct{}{}
+	}
+
+	return nil
+}
+
+func (c *Client) occupiedPathsForTree(
+	ctx context.Context,
+	owner string,
+	repo string,
+	treeSHA string,
+) (map[string]struct{}, error) {
+	tree, _, err := c.git.GetTree(ctx, owner, repo, treeSHA, true)
 	if err != nil {
 		return nil, err
 	}
-
 	occupied := make(map[string]struct{}, len(tree.Entries))
 	for _, entry := range tree.Entries {
 		if entry.GetPath() != "" {
@@ -206,6 +260,11 @@ func IsRetryable(err error) bool {
 
 func IsPathUnavailable(err error) bool {
 	var pathErr PathUnavailableError
+	return errors.As(err, &pathErr)
+}
+
+func IsPathExists(err error) bool {
+	var pathErr PathExistsError
 	return errors.As(err, &pathErr)
 }
 

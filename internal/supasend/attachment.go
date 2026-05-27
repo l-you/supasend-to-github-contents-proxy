@@ -14,9 +14,8 @@ import (
 )
 
 type Attachment struct {
-	Content     []byte
-	ContentType string
-	FileName    string
+	Content  []byte
+	FileName string
 }
 
 func DownloadAttachment(
@@ -50,9 +49,8 @@ func DownloadAttachment(
 	filename := filenameFromResponse(rawURL, resp.Header)
 
 	return Attachment{
-		Content:     content,
-		ContentType: strings.TrimSpace(resp.Header.Get("Content-Type")),
-		FileName:    filename,
+		Content:  content,
+		FileName: filename,
 	}, nil
 }
 

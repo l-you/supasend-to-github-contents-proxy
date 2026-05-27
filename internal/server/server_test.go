@@ -5,11 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/config"
+	"github.com/l-you/supasend-to-github-contents-proxy/internal/filecapture"
 	githubapi "github.com/l-you/supasend-to-github-contents-proxy/internal/github"
 	"github.com/stretchr/testify/require"
 )
@@ -43,17 +44,55 @@ func TestSupasendWebhookReturnsBadRequestWithOkFalse(t *testing.T) {
 	require.JSONEq(t, `{"ok":false,"error":"text is required"}`, rec.Body.String())
 }
 
-func TestFileWebhookRequiresText(t *testing.T) {
+func TestSupasendWebhookRequiresCreatedAt(t *testing.T) {
 	handler := New(config.Config{WebhookToken: "secret"}, nil, nil)
 
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/file", strings.NewReader(`{"file_name":"note"}`))
+	req := httptest.NewRequest(http.MethodPost, "/webhooks/supasend", strings.NewReader(`{"text":"hello"}`))
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 
 	handler.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusBadRequest, rec.Code)
-	require.JSONEq(t, `{"ok":false,"error":"text is required"}`, rec.Body.String())
+	require.JSONEq(t, `{"ok":false,"error":"created_at is required"}`, rec.Body.String())
+}
+
+func TestFileWebhookRequiresFolderName(t *testing.T) {
+	handler := New(config.Config{WebhookToken: "secret"}, nil, nil)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/file",
+		strings.NewReader(`{"created_at":"2026-05-26T10:00:00Z","text":"hello","file_name":"note.md"}`),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.JSONEq(
+		t,
+		`{"ok":false,"error":`+strconv.Quote(filecapture.MissingFolderNameReason)+`}`,
+		rec.Body.String(),
+	)
+}
+
+func TestFileWebhookRequiresCreatedAt(t *testing.T) {
+	handler := New(config.Config{WebhookToken: "secret"}, nil, nil)
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/file",
+		strings.NewReader(`{"folder_name":"capture","text":"hello","file_name":"note.md"}`),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.JSONEq(t, `{"ok":false,"error":"created_at is required"}`, rec.Body.String())
 }
 
 func TestFileWebhookRejectsInvalidBase64Attachment(t *testing.T) {
@@ -62,7 +101,10 @@ func TestFileWebhookRejectsInvalidBase64Attachment(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/webhooks/file",
-		strings.NewReader(`{"text":"hello","attachment_name":"hello.txt","attachment":"not-base64"}`),
+		strings.NewReader(
+			`{"folder_name":"capture","created_at":"2026-05-26T10:00:00Z",`+
+				`"attachment_name":"hello.txt","attachment":"not-base64"}`,
+		),
 	)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
@@ -80,7 +122,7 @@ func TestFileWebhookRequiresAttachmentNameWhenAttachmentProvided(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/webhooks/file",
-		strings.NewReader(`{"text":"hello","attachment":"aGk="}`),
+		strings.NewReader(`{"folder_name":"capture","created_at":"2026-05-26T10:00:00Z","attachment":"aGk="}`),
 	)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
@@ -108,7 +150,6 @@ func TestUnknownPathReturnsErrorReason(t *testing.T) {
 }
 
 func TestSupasendWebhookReturnsOKTrueOnSuccess(t *testing.T) {
-	createdAt := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
 		case "GET /repos/owner/repo/git/ref/heads/main":
@@ -135,17 +176,18 @@ func TestSupasendWebhookReturnsOKTrueOnSuccess(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := New(config.Config{
-		GitHubOwner:  "owner",
-		GitHubRepo:   "repo",
-		GitHubBranch: "main",
-		WebhookToken: "secret",
-		NoteDir:      "Inbox/Quick Capture",
+		GitHubOwner:       "owner",
+		GitHubRepo:        "repo",
+		GitHubBranch:      "main",
+		WebhookToken:      "secret",
+		NoteDir:           "Inbox/Quick Capture",
+		MaxAttachmentSize: 25 * 1024 * 1024,
 	}, githubClient, githubServer.Client())
-	handler.now = func() time.Time {
-		return createdAt
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/webhooks/supasend", strings.NewReader(`{"text":"hello"}`))
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/supasend",
+		strings.NewReader(`{"text":"hello","created_at":"2026-05-26T10:00:00Z"}`),
+	)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
 
@@ -155,8 +197,7 @@ func TestSupasendWebhookReturnsOKTrueOnSuccess(t *testing.T) {
 	require.JSONEq(t, `{"ok": true}`, rec.Body.String())
 }
 
-func TestFileWebhookAcceptsOptionalFileNameWithoutAttachment(t *testing.T) {
-	createdAt := time.Date(2026, 5, 26, 10, 0, 0, 0, time.UTC)
+func TestFileWebhookWritesNoteIntoRequiredFolder(t *testing.T) {
 	var noteContent string
 	githubServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method + " " + r.URL.Path {
@@ -191,20 +232,20 @@ func TestFileWebhookAcceptsOptionalFileNameWithoutAttachment(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := New(config.Config{
-		GitHubOwner:  "owner",
-		GitHubRepo:   "repo",
-		GitHubBranch: "main",
-		WebhookToken: "secret",
-		NoteDir:      "Inbox/Quick Capture",
+		GitHubOwner:       "owner",
+		GitHubRepo:        "repo",
+		GitHubBranch:      "main",
+		WebhookToken:      "secret",
+		NoteDir:           "Inbox/Quick Capture",
+		MaxAttachmentSize: 25 * 1024 * 1024,
 	}, githubClient, githubServer.Client())
-	handler.now = func() time.Time {
-		return createdAt
-	}
-
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/webhooks/file",
-		strings.NewReader(`{"text":"hello","file_name":"custom.md"}`),
+		strings.NewReader(
+			`{"folder_name":"run-1","created_at":"2026-05-26T10:00:00Z",`+
+				`"text":"hello","file_name":"custom.md"}`,
+		),
 	)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()
@@ -213,19 +254,17 @@ func TestFileWebhookAcceptsOptionalFileNameWithoutAttachment(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.JSONEq(t, `{"ok": true}`, rec.Body.String())
+	require.Contains(t, noteContent, "file_name: \"custom.md\"")
 	require.NotContains(t, noteContent, "attachment_name:")
 }
 
-func TestFileWebhookSuffixesNoteOnlyFilename(t *testing.T) {
+func TestFileWebhookWritesAttachmentOnlyIntoRequiredFolder(t *testing.T) {
 	githubServer := newCaptureGitHubServer(
 		t,
-		[]string{
-			"Inbox/Quick Capture/custom.md",
-			"Inbox/Quick Capture/custom-1.md",
-		},
+		nil,
 		func(t *testing.T, paths []string) {
 			t.Helper()
-			require.Equal(t, []string{"Inbox/Quick Capture/custom-2.md"}, paths)
+			require.Equal(t, []string{"Inbox/Quick Capture/run-1/receipt.txt"}, paths)
 		},
 	)
 	defer githubServer.Close()
@@ -234,57 +273,20 @@ func TestFileWebhookSuffixesNoteOnlyFilename(t *testing.T) {
 	require.NoError(t, err)
 
 	handler := New(config.Config{
-		GitHubOwner:  "owner",
-		GitHubRepo:   "repo",
-		GitHubBranch: "main",
-		WebhookToken: "secret",
-		NoteDir:      "Inbox/Quick Capture",
-	}, githubClient, githubServer.Client())
-
-	req := httptest.NewRequest(
-		http.MethodPost,
-		"/webhooks/file",
-		strings.NewReader(`{"text":"hello","file_name":"custom.md"}`),
-	)
-	req.Header.Set("Authorization", "Bearer secret")
-	rec := httptest.NewRecorder()
-
-	handler.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusOK, rec.Code)
-	require.JSONEq(t, `{"ok": true}`, rec.Body.String())
-}
-
-func TestFileWebhookWritesAttachmentIntoNamedFolder(t *testing.T) {
-	githubServer := newCaptureGitHubServer(
-		t,
-		[]string{"Inbox/Quick Capture/receipt-note/receipt-note.md"},
-		func(t *testing.T, paths []string) {
-			t.Helper()
-			require.Equal(t, []string{
-				"Inbox/Quick Capture/receipt-note-1/receipt-note-1.txt",
-				"Inbox/Quick Capture/receipt-note-1/receipt-note-1.md",
-			}, paths)
-		},
-	)
-	defer githubServer.Close()
-
-	githubClient, err := githubapi.NewClient(githubServer.URL, "gh-token", githubServer.Client())
-	require.NoError(t, err)
-
-	handler := New(config.Config{
-		GitHubOwner:  "owner",
-		GitHubRepo:   "repo",
-		GitHubBranch: "main",
-		WebhookToken: "secret",
-		NoteDir:      "Inbox/Quick Capture",
+		GitHubOwner:       "owner",
+		GitHubRepo:        "repo",
+		GitHubBranch:      "main",
+		WebhookToken:      "secret",
+		NoteDir:           "Inbox/Quick Capture",
+		MaxAttachmentSize: 25 * 1024 * 1024,
 	}, githubClient, githubServer.Client())
 
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/webhooks/file",
 		strings.NewReader(
-			`{"text":"receipt","file_name":"receipt-note","attachment_name":"receipt.txt","attachment":"aGVsbG8K"}`,
+			`{"folder_name":"run-1","created_at":"2026-05-26T10:00:00Z",`+
+				`"attachment_name":"receipt.txt","attachment":"aGVsbG8K"}`,
 		),
 	)
 	req.Header.Set("Authorization", "Bearer secret")
@@ -296,16 +298,95 @@ func TestFileWebhookWritesAttachmentIntoNamedFolder(t *testing.T) {
 	require.JSONEq(t, `{"ok": true}`, rec.Body.String())
 }
 
-func TestFileWebhookReturnsConflictWhenNameSuffixesExhausted(t *testing.T) {
+func TestFileWebhookAllowsAttachmentWhenFolderAlreadyHasNote(t *testing.T) {
+	githubServer := newCaptureGitHubServer(
+		t,
+		[]string{"Inbox/Quick Capture/run-1/receipt.md"},
+		func(t *testing.T, paths []string) {
+			t.Helper()
+			require.Equal(t, []string{"Inbox/Quick Capture/run-1/receipt.txt"}, paths)
+		},
+	)
+	defer githubServer.Close()
+
+	githubClient, err := githubapi.NewClient(githubServer.URL, "gh-token", githubServer.Client())
+	require.NoError(t, err)
+
+	handler := New(config.Config{
+		GitHubOwner:       "owner",
+		GitHubRepo:        "repo",
+		GitHubBranch:      "main",
+		WebhookToken:      "secret",
+		NoteDir:           "Inbox/Quick Capture",
+		MaxAttachmentSize: 25 * 1024 * 1024,
+	}, githubClient, githubServer.Client())
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/file",
+		strings.NewReader(
+			`{"folder_name":"run-1","created_at":"2026-05-26T10:00:00Z",`+
+				`"attachment_name":"receipt.txt","attachment":"aGVsbG8K"}`,
+		),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"ok": true}`, rec.Body.String())
+}
+
+func TestFileWebhookWritesNoteAndAttachmentIntoRequiredFolder(t *testing.T) {
+	githubServer := newCaptureGitHubServer(
+		t,
+		nil,
+		func(t *testing.T, paths []string) {
+			t.Helper()
+			require.Equal(t, []string{
+				"Inbox/Quick Capture/run-1/receipt.txt",
+				"Inbox/Quick Capture/run-1/receipt.md",
+			}, paths)
+		},
+	)
+	defer githubServer.Close()
+
+	githubClient, err := githubapi.NewClient(githubServer.URL, "gh-token", githubServer.Client())
+	require.NoError(t, err)
+
+	handler := New(config.Config{
+		GitHubOwner:       "owner",
+		GitHubRepo:        "repo",
+		GitHubBranch:      "main",
+		WebhookToken:      "secret",
+		NoteDir:           "Inbox/Quick Capture",
+		MaxAttachmentSize: 25 * 1024 * 1024,
+	}, githubClient, githubServer.Client())
+
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/webhooks/file",
+		strings.NewReader(
+			`{"folder_name":"run-1","text":"receipt","file_name":"receipt.md",`+
+				`"created_at":"2026-05-26T10:00:00Z",`+
+				`"attachment_name":"receipt.txt","attachment":"aGVsbG8K"}`,
+		),
+	)
+	req.Header.Set("Authorization", "Bearer secret")
+	rec := httptest.NewRecorder()
+
+	handler.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.JSONEq(t, `{"ok": true}`, rec.Body.String())
+}
+
+func TestFileWebhookReturnsConflictWhenTargetExists(t *testing.T) {
 	githubServer := newCaptureGitHubServer(
 		t,
 		[]string{
-			"Inbox/Quick Capture/custom.md",
-			"Inbox/Quick Capture/custom-1.md",
-			"Inbox/Quick Capture/custom-2.md",
-			"Inbox/Quick Capture/custom-3.md",
-			"Inbox/Quick Capture/custom-4.md",
-			"Inbox/Quick Capture/custom-5.md",
+			"Inbox/Quick Capture/run-1/custom.md",
 		},
 		func(t *testing.T, paths []string) {
 			t.Helper()
@@ -328,7 +409,10 @@ func TestFileWebhookReturnsConflictWhenNameSuffixesExhausted(t *testing.T) {
 	req := httptest.NewRequest(
 		http.MethodPost,
 		"/webhooks/file",
-		strings.NewReader(`{"text":"hello","file_name":"custom"}`),
+		strings.NewReader(
+			`{"folder_name":"run-1","created_at":"2026-05-26T10:00:00Z",`+
+				`"text":"hello","file_name":"custom.md"}`,
+		),
 	)
 	req.Header.Set("Authorization", "Bearer secret")
 	rec := httptest.NewRecorder()

@@ -2,6 +2,7 @@ package server
 
 import (
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/config"
 	githubapi "github.com/l-you/supasend-to-github-contents-proxy/internal/github"
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/note"
+	"github.com/l-you/supasend-to-github-contents-proxy/internal/repopath"
 	"github.com/l-you/supasend-to-github-contents-proxy/internal/supasend"
 )
 
@@ -22,7 +24,6 @@ type Server struct {
 	cfg        config.Config
 	github     *githubapi.Client
 	httpClient *http.Client
-	now        func() time.Time
 }
 
 func New(cfg config.Config, githubClient *githubapi.Client, httpClient *http.Client) *Server {
@@ -34,7 +35,6 @@ func New(cfg config.Config, githubClient *githubapi.Client, httpClient *http.Cli
 		cfg:        cfg,
 		github:     githubClient,
 		httpClient: httpClient,
-		now:        func() time.Time { return time.Now().UTC() },
 	}
 }
 
@@ -52,17 +52,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSupasend(w http.ResponseWriter, r *http.Request) {
-	s.handleCapture(w, r, decodeSupasendCapture)
+	s.handleCapture(w, r, maxPayloadBytes, decodeSupasendCapture)
 }
 
 func (s *Server) handleFile(w http.ResponseWriter, r *http.Request) {
-	s.handleCapture(w, r, decodeFileCapture)
+	s.handleCapture(
+		w,
+		r,
+		filePayloadMaxBytes(s.cfg.MaxAttachmentSize),
+		func(r *http.Request) (captureRequest, error) {
+			return decodeFileCapture(r, s.cfg.MaxAttachmentSize)
+		},
+	)
 }
 
 func (s *Server) handleCapture(
 	w http.ResponseWriter,
 	r *http.Request,
-	decode func(r *http.Request, fallbackCreatedAt time.Time) (captureRequest, error),
+	maxRequestBytes int64,
+	decode func(r *http.Request) (captureRequest, error),
 ) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -74,8 +82,8 @@ func (s *Server) handleCapture(
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, maxPayloadBytes)
-	capture, err := decode(r, s.now())
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBytes)
+	capture, err := decode(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -84,7 +92,7 @@ func (s *Server) handleCapture(
 	result, err := s.captureToGitHub(r, capture)
 	if err != nil {
 		log.Printf("capture failed: %v", err)
-		if githubapi.IsPathUnavailable(err) {
+		if githubapi.IsPathUnavailable(err) || githubapi.IsPathExists(err) {
 			writeError(w, http.StatusConflict, err.Error())
 			return
 		}
@@ -121,9 +129,12 @@ func (s *Server) captureToGitHub(r *http.Request, capture captureRequest) (captu
 }
 
 func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (captureResponse, error) {
+	if capture.FolderName != "" {
+		return s.fileCaptureToGitHubOnce(r, capture)
+	}
+
 	var files []githubapi.File
 	var attachmentPath string
-	var attachmentContentType string
 	var attachmentName string
 	var attachmentContent []byte
 
@@ -140,11 +151,9 @@ func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (c
 		}
 
 		attachmentName = attachment.FileName
-		attachmentContentType = attachment.ContentType
 		attachmentContent = attachment.Content
 	case capture.AttachmentName != "":
 		attachmentName = capture.AttachmentName
-		attachmentContentType = capture.AttachmentContentType
 		attachmentContent = capture.AttachmentContent
 	}
 
@@ -164,15 +173,13 @@ func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (c
 	}
 
 	noteContent := note.Render(note.Capture{
-		Source:                capture.Source,
-		Text:                  capture.Text,
-		CreatedAt:             capture.CreatedAt,
-		DueDateUTC:            capture.DueDateUTC,
-		FileURL:               capture.FileURL,
-		NoteName:              noteName,
-		AttachmentName:        attachmentBaseName,
-		AttachmentPath:        attachmentPath,
-		AttachmentContentType: attachmentContentType,
+		Source:         capture.Source,
+		Text:           capture.Text,
+		CreatedAt:      capture.CreatedAt,
+		FileURL:        capture.FileURL,
+		NoteName:       noteName,
+		AttachmentName: attachmentBaseName,
+		AttachmentPath: attachmentPath,
 	})
 	files = append(files, githubapi.File{Path: notePath, Content: noteContent})
 
@@ -183,6 +190,55 @@ func (s *Server) captureToGitHubOnce(r *http.Request, capture captureRequest) (c
 		s.cfg.GitHubBranch,
 		"Add Supasend capture",
 		files,
+		githubapi.CommitOptions{},
+	)
+	if err != nil {
+		return captureResponse{}, err
+	}
+
+	return captureResponse{
+		CommitSHA:      commit.SHA,
+		NotePath:       notePath,
+		AttachmentPath: attachmentPath,
+	}, nil
+}
+
+func (s *Server) fileCaptureToGitHubOnce(r *http.Request, capture captureRequest) (captureResponse, error) {
+	files := make([]githubapi.File, 0, 2)
+	var notePath string
+	var attachmentPath string
+
+	if capture.AttachmentName != "" {
+		attachmentPath = repopath.File(s.cfg.NoteDir, capture.FolderName, capture.AttachmentName)
+		files = append(files, githubapi.File{Path: attachmentPath, Content: capture.AttachmentContent})
+	}
+
+	if capture.Text != "" {
+		notePath = repopath.File(s.cfg.NoteDir, capture.FolderName, capture.NoteFileName)
+		attachmentBaseName := ""
+		if attachmentPath != "" {
+			attachmentBaseName = path.Base(attachmentPath)
+		}
+
+		noteContent := note.Render(note.Capture{
+			Source:         capture.Source,
+			Text:           capture.Text,
+			CreatedAt:      capture.CreatedAt,
+			NoteName:       capture.NoteFileName,
+			AttachmentName: attachmentBaseName,
+			AttachmentPath: attachmentPath,
+		})
+		files = append(files, githubapi.File{Path: notePath, Content: noteContent})
+	}
+
+	commit, err := s.github.CommitFiles(
+		r.Context(),
+		s.cfg.GitHubOwner,
+		s.cfg.GitHubRepo,
+		s.cfg.GitHubBranch,
+		"Add file capture",
+		files,
+		githubapi.CommitOptions{RejectExisting: true},
 	)
 	if err != nil {
 		return captureResponse{}, err
@@ -282,13 +338,21 @@ type errorResponse struct {
 }
 
 type captureRequest struct {
-	Source                string
-	Text                  string
-	FileURL               string
-	NoteName              string
-	AttachmentName        string
-	AttachmentContent     []byte
-	AttachmentContentType string
-	DueDateUTC            string
-	CreatedAt             time.Time
+	Source            string
+	Text              string
+	FileURL           string
+	FolderName        string
+	NoteName          string
+	NoteFileName      string
+	AttachmentName    string
+	AttachmentContent []byte
+	CreatedAt         time.Time
+}
+
+func filePayloadMaxBytes(maxAttachmentBytes int64) int64 {
+	if maxAttachmentBytes <= 0 {
+		return maxPayloadBytes
+	}
+
+	return int64(base64.StdEncoding.EncodedLen(int(maxAttachmentBytes))) + maxPayloadBytes
 }
