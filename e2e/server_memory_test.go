@@ -27,7 +27,7 @@ import (
 func TestServerMemoryCaptureE2E(t *testing.T) {
 	repoRoot := repoRoot(t)
 	binaryPath := filepath.Join(t.TempDir(), "supasend-to-github")
-	build := exec.Command("go", "build", "-o", binaryPath, "./cmd/server")
+	build := exec.Command("go", "build", "-tags", "debug", "-o", binaryPath, "./cmd/server")
 	build.Dir = repoRoot
 	buildOutput, err := build.CombinedOutput()
 	require.NoErrorf(t, err, "build server: %s", buildOutput)

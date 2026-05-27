@@ -28,6 +28,9 @@ NOTE_DIR="Inbox/Quick Capture"
 MAX_ATTACHMENT_BYTES=26214400
 ```
 
+`DEBUG_LISTEN_ADDR` only works in binaries built with `-tags debug`. The Docker
+image is built without debug endpoints.
+
 Auth is always:
 
 ```text
@@ -49,7 +52,7 @@ task go:e2e:memory
 
 This opt-in test builds the real server, runs it against a local fake GitHub API,
 sends captures through HTTP, and logs allocation/RAM counters from
-`DEBUG_LISTEN_ADDR`.
+`DEBUG_LISTEN_ADDR`. It builds the server with `-tags debug`.
 
 Tune it with `E2E_CAPTURE_COUNT` and `E2E_ATTACHMENT_BYTES`.
 
